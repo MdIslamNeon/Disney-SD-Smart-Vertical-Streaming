@@ -1,1 +1,2 @@
-all results goes here
+# outputs
+This folder contains all generated results.

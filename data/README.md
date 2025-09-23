@@ -1,1 +1,2 @@
-all datasets, videos, images, goes here
+# data
+This folder stores input data for the project.
