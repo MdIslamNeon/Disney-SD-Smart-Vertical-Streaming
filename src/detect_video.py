@@ -9,7 +9,7 @@ def main():
     # Make sure save directory exists
     os.makedirs(SAVE_DIR, exist_ok=True)
 
-    # Load YOLOv8 model
+    # YOLOv8 model
     model = YOLO(MODEL_PATH)
 
     # Run detection
@@ -21,8 +21,6 @@ def main():
         exist_ok=True,            # overwrite previous "run"
         show=False                 # Don't preview while running
     )
-
-    print(f"\n Detection complete. Results saved to: {SAVE_DIR}/run")
 
 if __name__ == "__main__":
     main()
