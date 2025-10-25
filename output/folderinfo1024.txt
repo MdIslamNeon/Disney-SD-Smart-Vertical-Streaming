@@ -1,0 +1,16 @@
+Started with yolo small and messing with its values didn't seem to work.
+Wasn't sure about the "horse" section of my assigned work, so I decided to mess with the confidence levels and use the iou (collision). I also used "heavier" yolo models this time which takes longer to process but has better detections. (Small < Medium < Large)
+
+A = yolo medium
+B = yolo large
+
+conf = confidence for detection.
+iou = boundary collision. If 2 detections have a X% collision, detects the object with the higest confidence. Used mainly to help remove some audience in some frames.
+
+"Aconf35iou80.avi" -> Confidence = 35%, IOU = 80%, Using YOLO Medium
+
+Yolo-Medium: ~2:40
+Yolo-Large: ~5:40
+
+Google Colab link (edit): https://colab.research.google.com/drive/169eQuPRAxpOVNjcaITnUGCmA2EEPtT2P?usp=sharing
+Additionally attached .ipynb and .py files incase. I did this on Google Colab.
