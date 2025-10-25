@@ -1,29 +1,48 @@
 from ultralytics import YOLO
+import os
 
-# Load a pre-trained YOLOv8s model
-model = YOLO('yolov8s.pt')
+# Load a pre-trained YOLO model ('yolov8s.pt' kinda doo doo. get an upgrade [s, m, l])
+model = YOLO('yolov8l.pt')
 
-# grab video folder
-video_folder = '/content/ultralytics/ultralytics/videos'
-video_files = [os.path.join(video_folder, f) for f in os.listdir(video_folder) if f.endswith(('.mp4', '.avi', '.mov'))] # Add other video extensions if needed and get full paths
+# Folder containing videos
+video_folder = '/content/ultralytics/ultralytics/videos' # input folder (put videos here)
+output_folder = '/content/ultralytics/ultralytics/all_videos_output' # output folder (view videos with detetections here)
+os.makedirs(output_folder, exist_ok=True)
 
-# incase video file is empty...
+# Get list of video files
+video_files = [
+    os.path.join(video_folder, f)
+    for f in os.listdir(video_folder)
+    if f.endswith(('.mp4', '.avi', '.mov'))
+]
+
+# Check if any videos were found
 if not video_files:
     print(f"No video files found in {video_folder}")
 else:
-    print(f"Found {len(video_files)} video files to process.")
-    # Process each video file individually and save results to a single folder
-    # iterates thru videos. (for now, leave conf at 0.3)
-    for video_index, video_path in enumerate(video_files):
-        #print(f"Processing video {video_index + 1}/{len(video_files)}: {os.path.basename(video_path)}")
-        # run the model on the current video
-        results = model.predict(video_path, classes=[0], stream=False, save=True, conf=0.3, project='runs/detect', name='single_output_folder') # classes=[0] for 'person'
+    print(f"Found {len(video_files)} videos to look at.")
 
-        # Iterate thru results (one result object per frame) and summarize
-        for i, result in enumerate(results):
-            # Access the detections for the current frame
-            detections = result.boxes
+# Process each video file individually and save results to a single folder (gonna take rlly long maybe find a way to run them in multiple processes?)
+for video_index, video_path in enumerate(video_files):
+    print(f"Processing video {video_index + 1}/{len(video_files)}: {os.path.basename(video_path)}")
 
-            # count the number of detections (classes=[0] = people)
-            num_people = len(detections)
-            print(f"  Video {video_index + 1}, Frame {i}: Detected {num_people} people")
+    # Run YOLOv8 on the current video
+    # conf = will box the detected players with 0.X confidence.
+    # iou = if boxes overlap by 0.X, keep the one with the highest confidence (maybe set it high cause some sports require close contact)
+    results = model.predict(
+        source=video_path,
+        classes=[0],
+        stream=False,
+        save=True,
+        conf=0.35,
+        iou=0.9,
+        project='project=output_folder',
+        name='',  # All outputs go into the same folder (name above)
+        exist_ok=True
+    )
+
+    # Iterate through results (one per frame)
+    for i, result in enumerate(results):
+        detections = result.boxes
+        num_people = len(detections)
+        print(f"  Video {video_index + 1}, Frame {i}: Detected {num_people} people")
