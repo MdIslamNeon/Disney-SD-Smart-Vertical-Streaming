@@ -1,9 +1,47 @@
-import cv2
+import cv2 # OpenCV's python module
+import numpy as np
 import torch #future GPU implementation 
 from ultralytics import YOLO
 
+def kalman_filter():
+    # 4 state variables (x, y, vx, vy) and 2 coordinates (x, y) for YOLO  
+    kalman_filter = cv2.KalmanFilter(4, 2)
+    
+    '''
+    Measure x and y coordiantes only from the 4 state variables (x, y, vx, vy)
+    YOLO only knows x and y and not velocity
+    '''
+    kalman_filter.measurementMatrix = np.array(
+        [[1, 0, 0, 0], [0, 1, 0, 0]], np.float32
+    )
+    
+    '''
+    This defines how the object moves from one frame to the next
+    Each frame, the ball’s position changes based on its velocity
+    
+        x_next = x + vx (1*x + 0*y + 1*vx + 0*vy) <- 1st array 
+        y_next = y + vy (0*x + 1*y + 0*vx + 1*vy) <- 2nd array
+        vx_next = vx (0*x + 0*y + 1*vx + 0*vy) <- 3rd array
+        vy_next = vy (0*x + 0*y + 0*vx + 1*vy) <- 4th array
+        
+    '''
+    kalman_filter.transitionMatrix = np.array(
+        [[1, 0, 1, 0],[0, 1, 0, 1],
+         [0, 0, 1, 0],[0, 0, 0, 1]], np.float32
+    )
+    
+    '''
+    This defines how much random movement or uncertainty we allow in the model
+    A higher value → more “flexible” predictions (follows the object faster but noisier)
+    A lower value → smoother predictions (slower to respond to quick movement)
+    '''
+    kalman_filter.processNoiseCov = np.eye(4, dtype=np.float32) * 0.03 # This number can be adjusted
+    return kalman_filter
 
 def main():
+    '''
+    Put these videos under the local_videos folder
+    '''
     #mp4_file = "ft0_v108_002649_x264.mp4"
     #mp4_file = "1080p60fps_RT.mp4"
     #mp4_file = "1080p60fps_RT2.mp4"
