@@ -1,0 +1,6 @@
+__pycache__/
+*.mp4
+*.pt
+*.onnx
+.env
+smart_vertical_env/
