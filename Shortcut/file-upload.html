@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>File Upload</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="container">
+      <h2>File Upload</h2>
+
+      <!-- Drop Zone -->
+      <div id="dropZone">
+        <svg
+          xmlns="http://www.w3.org/2000/svg"
+          width="40"
+          height="40"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+        >
+          <path
+            stroke-linecap="round"
+            stroke-linejoin="round"
+            stroke-width="1.5"
+            d="M3 16.5v2.25A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 18.75V16.5m-13.5-9L12 3m0 0l4.5 4.5M12 3v13.5"
+          />
+        </svg>
+        <p>Drag & drop files here</p>
+        <span>or</span>
+        <label for="fileInput" class="upload-btn">Browse Files</label>
+        <input
+          type="file"
+          id="fileInput"
+          multiple
+          accept=".mp4,.avi,.mov,video/*"
+        />
+      </div>
+      <p class="limit-note">Max file size: 2GB &nbsp;|&nbsp; MP4, AVI, MOV</p>
+
+      <!-- File List -->
+      <div id="fileList"></div>
+
+      <!-- Upload Button -->
+      <button id="uploadBtn">Upload Files</button>
+      <p id="statusMsg"></p>
+    </div>
+
+    <script>
+      const dropZone = document.getElementById("dropZone");
+      const fileInput = document.getElementById("fileInput");
+      const fileList = document.getElementById("fileList");
+      const uploadBtn = document.getElementById("uploadBtn");
+      const statusMsg = document.getElementById("statusMsg");
+
+      const MAX_SIZE = 2 * 1024 * 1024 * 1024; // 2GB
+      let selectedFiles = [];
+
+      // Drag & Drop
+      dropZone.addEventListener("dragover", (e) => {
+        e.preventDefault();
+        dropZone.classList.add("dragover");
+      });
+
+      dropZone.addEventListener("dragleave", () =>
+        dropZone.classList.remove("dragover"),
+      );
+
+      dropZone.addEventListener("drop", (e) => {
+        e.preventDefault();
+        dropZone.classList.remove("dragover");
+        addFiles(e.dataTransfer.files);
+      });
+
+      // Browse button
+      fileInput.addEventListener("change", () => addFiles(fileInput.files));
+
+      function addFiles(files) {
+        [...files].forEach((file) => {
+          const isDuplicate = selectedFiles.some(
+            (f) => f.name === file.name && f.size === file.size,
+          );
+          if (!isDuplicate) selectedFiles.push(file);
+        });
+        renderFileList();
+      }
+
+      function renderFileList() {
+        fileList.innerHTML = "";
+
+        selectedFiles.forEach((file, index) => {
+          const isTooBig = file.size > MAX_SIZE;
+          const isImage = file.type.startsWith("image/");
+
+          const item = document.createElement("div");
+          item.className = "file-item";
+
+          // Icon / preview
+          const iconDiv = document.createElement("div");
+          iconDiv.className = "file-icon";
+
+          if (isImage) {
+            const img = document.createElement("img");
+            const reader = new FileReader();
+            reader.onload = (e) => (img.src = e.target.result);
+            reader.readAsDataURL(file);
+            iconDiv.appendChild(img);
+          } else {
+            const ext = file.name.split(".").pop().toUpperCase();
+            iconDiv.textContent = ext;
+          }
+
+          // Info
+          const info = document.createElement("div");
+          info.className = "file-info";
+          info.innerHTML = `
+        <div class="file-name">${file.name}</div>
+        <div class="file-size">${formatSize(file.size)}</div>
+      `;
+
+          // Status badge
+          const status = document.createElement("span");
+          status.className = `file-status ${isTooBig ? "status-error" : "status-ready"}`;
+          status.textContent = isTooBig ? "Too large" : "Ready";
+
+          // Remove button
+          const removeBtn = document.createElement("button");
+          removeBtn.className = "remove-btn";
+          removeBtn.innerHTML = "&times;";
+          removeBtn.title = "Remove";
+          removeBtn.addEventListener("click", () => {
+            selectedFiles.splice(index, 1);
+            renderFileList();
+          });
+
+          item.appendChild(iconDiv);
+          item.appendChild(info);
+          item.appendChild(status);
+          item.appendChild(removeBtn);
+          fileList.appendChild(item);
+        });
+
+        // Show/hide upload button
+        const hasValid = selectedFiles.some((f) => f.size <= MAX_SIZE);
+        uploadBtn.style.display = selectedFiles.length > 0 ? "block" : "none";
+        uploadBtn.disabled = !hasValid;
+        statusMsg.style.display = "none";
+      }
+
+      function formatSize(bytes) {
+        if (bytes < 1024) return bytes + " B";
+        if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+        if (bytes < 1024 * 1024 * 1024)
+          return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+        return (bytes / (1024 * 1024 * 1024)).toFixed(2) + " GB";
+      }
+
+      // Chunked upload for large video files
+      async function uploadFileInChunks(file, onProgress) {
+        const CHUNK_SIZE = 100 * 1024 * 1024; // 100MB chunks
+        const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+
+        for (let i = 0; i < totalChunks; i++) {
+          const chunk = file.slice(i * CHUNK_SIZE, (i + 1) * CHUNK_SIZE);
+          const formData = new FormData();
+          formData.append("file", chunk);
+          formData.append("filename", file.name);
+          formData.append("chunkIndex", i);
+          formData.append("totalChunks", totalChunks);
+
+          const response = await fetch("/upload", {
+            method: "POST",
+            body: formData,
+          });
+          if (!response.ok) throw new Error(`Chunk ${i + 1} failed`);
+
+          onProgress(Math.round(((i + 1) / totalChunks) * 100));
+        }
+      }
+
+      // Upload with chunking + per-file progress
+      uploadBtn.addEventListener("click", async () => {
+        const validFiles = selectedFiles.filter((f) => f.size <= MAX_SIZE);
+
+        uploadBtn.textContent = "Uploading...";
+        uploadBtn.disabled = true;
+        statusMsg.style.display = "block";
+        statusMsg.style.color = "#6b7280";
+
+        let successCount = 0;
+
+        for (let i = 0; i < validFiles.length; i++) {
+          const file = validFiles[i];
+          statusMsg.textContent = `Uploading ${file.name} (${i + 1}/${validFiles.length})... 0%`;
+
+          try {
+            await uploadFileInChunks(file, (pct) => {
+              statusMsg.textContent = `Uploading ${file.name} (${i + 1}/${validFiles.length})... ${pct}%`;
+            });
+            successCount++;
+          } catch (err) {
+            statusMsg.textContent = `❌ Failed to upload ${file.name}: ${err.message}`;
+            statusMsg.style.color = "#dc2626";
+            uploadBtn.textContent = "Upload Files";
+            uploadBtn.disabled = false;
+            return;
+          }
+        }
+
+        statusMsg.textContent = `✅ ${successCount} file(s) uploaded successfully!`;
+        statusMsg.style.color = "#16a34a";
+        selectedFiles = [];
+        renderFileList();
+        uploadBtn.textContent = "Upload Files";
+        uploadBtn.disabled = false;
+        uploadBtn.style.display = "none";
+      });
+    </script>
+  </body>
+</html>
