@@ -19,17 +19,14 @@ debug_folder.mkdir(exist_ok=True)
 print("Looking in:", local_videos)
 print("Exists?", local_videos.exists())
 
-# -----------------------------
-# Config (tuned for smoother motion)
-# -----------------------------
+
 cropped_width, cropped_height = 540, 960
 CONF = 0.15
 IMGSZ = 1280
 
-DETECT_EVERY_N = 1   # ✅ run YOLO every frame
-SMOOTHING = 0.92     # ✅ stronger smoothing
-MAX_MOVE = 25        # ✅ tighter speed cap (pixels/frame). Set None to disable.
-
+DETECT_EVERY_N = 1   
+SMOOTHING = 0.92     
+MAX_MOVE = 25        
 # -----------------------------
 # YOLO Setup
 # -----------------------------
