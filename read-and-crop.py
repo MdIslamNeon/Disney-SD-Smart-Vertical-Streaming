@@ -67,6 +67,8 @@ for idx, video_path in enumerate(video_files, start=1):
     out_path.parent.mkdir(parents=True, exist_ok=True)  # Ensure class folder exists in output
 
     # fourcc + VideoWriter: where we will write the cropped frames (resized to OUT_W x OUT_H)
+    
+    #! Error here fix later! !#
     fourcc = cv2.VideoWriter_fourcc(*"mp4v")
     writer = cv2.VideoWriter(str(out_path), fourcc, fps, (OUT_W, OUT_H))
 

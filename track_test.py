@@ -13,7 +13,7 @@ if not hasattr(np, "bool"):
 
 import cv2
 import time
-from ultralytics import YOLO
+from ultralytics.models.yolo import YOLO
 from types import SimpleNamespace
 from yolox.tracker.byte_tracker import BYTETracker
 
