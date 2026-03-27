@@ -20,5 +20,8 @@ At the end of the semester:
 A working prototype: given a input sport video -> detect key sport events adding metadata to the  objects.
 Final presentation + SRD + SDD.
 
+Basketball footage is sourced from Pexels, royalty free.
+
+
 # Packages Installed
 ultralytics (for YOLO)

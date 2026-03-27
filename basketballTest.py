@@ -1,17 +1,76 @@
-import cv2
+import cv2 # OpenCV’s python module
+import numpy as np
+import torch #future GPU implementation
 from ultralytics import YOLO
 
+def kalman_filter():
+    # 4 state variables (x, y, vx, vy) and 2 coordinates (x, y) for YOLO
+    kalman_filter = cv2.KalmanFilter(4, 2)
+
+    ‘’’
+    Measure x and y coordiantes only from the 4 state variables (x, y, vx, vy)
+    YOLO only knows x and y and not velocity
+    ‘’’
+    kalman_filter.measurementMatrix = np.array(
+        [[1, 0, 0, 0], [0, 1, 0, 0]], np.float32
+    )
+
+    ‘’’
+    This defines how the object moves from one frame to the next
+    Each frame, the ball’s position changes based on its velocity
+
+        x_next = x + vx (1*x + 0*y + 1*vx + 0*vy) <- 1st array
+        y_next = y + vy (0*x + 1*y + 0*vx + 1*vy) <- 2nd array
+        vx_next = vx (0*x + 0*y + 1*vx + 0*vy) <- 3rd array
+        vy_next = vy (0*x + 0*y + 0*vx + 1*vy) <- 4th array
+
+    ‘’’
+    kalman_filter.transitionMatrix = np.array(
+        [[1, 0, 1, 0],[0, 1, 0, 1],
+         [0, 0, 1, 0],[0, 0, 0, 1]], np.float32
+    )
+
+    ‘’’
+    This defines how much random movement or uncertainty we allow in the model
+    A higher value → more “flexible” predictions (follows the object faster but noisier)
+    A lower value → smoother predictions (slower to respond to quick movement)
+    ‘’’
+    kalman_filter.processNoiseCov = np.eye(4, dtype=np.float32) * 0.03 # This number can be adjusted
+    return kalman_filter
+
 def main():
-    mp4_file = "ft0_v108_002649_x264.mp4"
-    # Load YOLOv8n (nano, fast, lightweight)
-    model = YOLO("yolov8n.pt")
+    ‘’’
+    Put these videos under the local_videos folder
+    ‘’’
+    #mp4_file = “ft0_v108_002649_x264.mp4”
+    #mp4_file = “1080p60fps_RT.mp4”
+    #mp4_file = “1080p60fps_RT2.mp4”
+    #mp4_file = “3840_2160_30fps_RT3.mp4”
+    #mp4_file = “3840_2160_30fps_RT4.mp4”
+    mp4_file = “1920_1080_30fps_RT5.mp4”
 
+    # Load YOLOv8n (COCO pretrained)
+    model = YOLO(“yolov8m.pt”)
 
+    # Get ID for ‘sports ball’
+    ball_class_id = [k for k, v in model.names.items() if v == “sports ball”][0]
+    #person_class_id = [k for k, v in model.names.items() if v == “person”][0] #remove comment if necessary
+    print(f”Detected ‘sports ball’ class ID: {ball_class_id}”)
+
+    # Run detection stream
     results = model.predict(
         source=mp4_file,
+        tracker=”bytetrack.yaml”, #redudancy, byterack should be on by default
         stream=True,
+        imgsz=992, #default 640 - multiples of 32. (tips: 640 = 60fps, 1280 + 0.10conf -> 30fps)
+        conf=0.40, #default 0.25 (tips: 0.10 for nano #0.4 for small - disregard for now 10)
+        iou = 0.4, #overlapping - lower is less overlap
         save=True,
+        classes=[ball_class_id,], #only the designated sports ball will be detected, add person_class_id if necessary
+
+
     )
+
 
     window_name = "YOLO Detections"
     cv2.namedWindow(window_name, cv2.WINDOW_NORMAL)
@@ -23,6 +82,8 @@ def main():
         if cv2.waitKey(1) & 0xFF in (27, ord('q')):
             break
     cv2.destroyAllWindows()
+
+
 
 if __name__ == "__main__":
     main()
