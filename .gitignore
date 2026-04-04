@@ -3,6 +3,12 @@ venv/
 .venv/
 env/
 .env/
+sd_disney/Lib/
+sd_disney/Scripts/
+sd_disney/Include/
+sd_disney/etc/
+sd_disney/share/
+sd_disney/pyvenv.cfg
 
 # Python cache
 __pycache__/
@@ -35,8 +41,6 @@ htmlcov/
 Thumbs.db
 
 # Output videos / images (project-specific)
-*.mp4
-*.avi
 *.mov
 *.mkv
 *.jpg
@@ -47,3 +51,6 @@ Thumbs.db
 *.pt
 *.pth
 *.weights
+
+# ByteTrack dependency (install separately via requirements.txt)
+ByteTrack/
