@@ -4,3 +4,5 @@ __pycache__/
 *.onnx
 .env
 smart_vertical_env/
+runs/
+*.avi
