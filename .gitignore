@@ -54,3 +54,7 @@ Thumbs.db
 
 # ByteTrack dependency (install separately via requirements.txt)
 ByteTrack/
+
+smart_vertical_env/
+runs/
+*.avi

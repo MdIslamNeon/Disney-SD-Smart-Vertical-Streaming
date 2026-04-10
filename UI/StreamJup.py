@@ -1,13 +1,17 @@
+import os
+#? Note that these env variables are for linux. The current terminal outputs OpenH264 library error but can be ignored for now
+os.environ["OPENCV_LOG_LEVEL"] = "SILENT"
+os.environ["OPENCV_FFMPEG_LOGLEVEL"] = "-8"  # AV_LOG_QUIET
+
 import streamlit as st
 import cv2
 import numpy as np
 import tempfile
-import os
 import time
 from ultralytics import YOLO
 
-st.set_page_config(page_title="YOLOv8 Person Detection", layout="wide")
-st.title("YOLOv8 Person Detection")
+st.set_page_config(page_title="Smart Vertical Basketball Streaming", layout="wide")
+st.title("Smart Vertical Basketball Streaming")
 
 @st.cache_resource
 def load_model():
@@ -47,6 +51,29 @@ def process_video(video_path, model):
     progress.empty()
     return annotated_frames, frame_counts, fps, time.time() - start
 
+def render_video(frames, fps):
+    """Write annotated RGB frames to a temp mp4 using H.264 (avc1) for browser playback."""
+    h, w = frames[0].shape[:2]
+
+    out_tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
+    out_path = out_tmp.name
+    out_tmp.close()
+
+    fourcc = cv2.VideoWriter.fourcc(*"avc1")
+    writer = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
+    if not writer.isOpened():
+        st.error("H.264 (avc1) codec not available. Install ffmpeg and add it to PATH.")
+        return None
+
+    progress = st.progress(0, text="Rendering video...")
+    for i, frame_rgb in enumerate(frames):
+        writer.write(cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR))
+        progress.progress((i + 1) / len(frames), text=f"Rendering frame {i+1}/{len(frames)}")
+    writer.release()
+    progress.empty()
+    return out_path
+
+
 uploaded_file = st.file_uploader("Upload a video", type=["mp4", "avi", "mov"])
 
 if uploaded_file:
@@ -61,11 +88,13 @@ if uploaded_file:
         st.session_state.frames  = frames
         st.session_state.counts  = counts
         st.session_state.elapsed = elapsed
+        st.session_state.fps     = fps
 
 if "frames" in st.session_state:
     frames  = st.session_state.frames
     counts  = st.session_state.counts
     elapsed = st.session_state.elapsed
+    fps     = st.session_state.fps
 
     st.success(f"Processed {len(frames)} frames in {elapsed:.1f}s ({elapsed/60:.1f} min)")
 
@@ -75,10 +104,25 @@ if "frames" in st.session_state:
     col3.metric("Peak people",      max(counts) if counts else 0)
 
     st.divider()
-    frame_idx = st.slider("Scrub through frames", 0, len(frames) - 1, 0)
-    st.image(frames[frame_idx],
-             caption=f"Frame {frame_idx} - {counts[frame_idx]} people",
-             use_container_width=True)
+
+    tab_scrubber, tab_play = st.tabs(["Frame Scrubber", "Play Video"])
+
+    with tab_scrubber:
+        frame_idx = st.slider("Scrub through frames", 0, len(frames) - 1, 0)
+        st.image(frames[frame_idx],
+                 caption=f"Frame {frame_idx} - {counts[frame_idx]} people",
+                 width='stretch')
+
+    with tab_play:
+        if st.button("Render & Play Video"):
+            out_path = render_video(frames, fps)
+            if out_path is not None:
+                with open(out_path, "rb") as f:
+                    st.session_state.video_bytes = f.read()
+                os.unlink(out_path)
+
+        if "video_bytes" in st.session_state:
+            st.video(st.session_state.video_bytes)
 
 else:
     st.info("Upload a video to get started.")
