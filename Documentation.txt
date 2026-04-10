@@ -1,0 +1,69 @@
+Disney SD Smart Vertical Streaming — Project Documentation
+==========================================================
+
+PROJECT STRUCTURE
+-----------------
+Disney-SD-Smart-Vertical-Streaming/
+├── UI/
+│   ├── StreamJup.py          # Main Streamlit app (YOLOv8 person detection UI)
+│   └── Streamlit_UI.py       # Alternate/legacy Streamlit UI
+├── cropping/
+│   ├── read-and-crop.py      # Basic video read and crop
+│   ├── reframe_9x16.py       # 9:16 auto-reframing with ByteTrack
+│   ├── smartCroppingImages.py
+│   └── smartCroppingVideos.py
+├── models/
+│   ├── yolov8n.pt            # YOLOv8 nano weights
+│   ├── yolov8s.pt            # YOLOv8 small weights
+│   └── yolov8m.pt            # YOLOv8 medium weights (used by UI)
+├── tests/
+│   ├── basketballTest.py
+│   ├── read-and-crop-test.py
+│   └── track_test.py
+├── ByteTrack/                # ByteTrack submodule/clone
+├── sd_disney/                # Python virtual environment
+├── requirements.txt
+├── run_ui.bat                # One-click script to launch the UI
+└── Documentation.txt
+
+
+SETUP
+-----
+1. Clone the repository:
+      git clone <repo-url>
+      cd Disney-SD-Smart-Vertical-Streaming
+
+2. Create the virtual environment:
+      python -m venv sd_disney
+
+3. Activate it:
+      Windows (PowerShell):  .\sd_disney\Scripts\Activate.ps1
+      Windows (CMD):         sd_disney\Scripts\activate.bat
+      Mac/Linux:             source sd_disney/bin/activate
+
+4. Install dependencies:
+      pip install -r requirements.txt
+
+   Note: If the ByteTrack git install fails, clone manually:
+      git clone https://github.com/ifzhang/ByteTrack.git
+      cd ByteTrack && pip install -e . && cd ..
+
+
+RUNNING THE UI
+--------------
+From the project root, double-click or run:
+      .\run_ui.bat
+
+This launches StreamJup.py via Streamlit without needing to cd into the UI folder.
+
+If the .bat launchers are broken (stale venv path), bypass them with:
+      & ".\sd_disney\Scripts\python.exe" -m streamlit run UI\StreamJup.py
+
+
+KEY DEPENDENCIES
+----------------
+- ultralytics    — YOLOv8 model inference
+- opencv-python  — Video reading and frame processing
+- streamlit      — Web UI
+- ByteTrack      — Multi-object tracking (via yolox package)
+- numpy, tqdm, kagglehub

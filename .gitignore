@@ -1,0 +1,60 @@
+# Virtual environments
+venv/
+.venv/
+env/
+.env/
+sd_disney/Lib/
+sd_disney/Scripts/
+sd_disney/Include/
+sd_disney/etc/
+sd_disney/share/
+sd_disney/pyvenv.cfg
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+*.egg
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDEs
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Output videos / images (project-specific)
+*.mov
+*.mkv
+*.jpg
+*.jpeg
+*.png
+
+# Model weights (project-specific)
+*.pt
+*.pth
+*.weights
+
+# ByteTrack dependency (install separately via requirements.txt)
+ByteTrack/
+
+smart_vertical_env/
+runs/
+*.avi
