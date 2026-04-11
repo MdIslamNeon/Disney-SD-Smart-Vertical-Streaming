@@ -17,7 +17,7 @@ import streamlit as st
 import streamlit.components.v1 as components
 from ultralytics import YOLO
 
-st.set_page_config(page_title="Smart Vertical Basketball Streaming", layout="wide")
+st.set_page_config(page_title="Smart Vertical Basketball Streaming", layout="wide", initial_sidebar_state="collapsed")
 st.title("Smart Vertical Basketball Streaming")
 
 
@@ -193,7 +193,7 @@ def build_player_html(video_url: str, frame_boxes: dict,
 </style>
 
 <div id="controls">
-  <button id="toggleBtn" onclick="toggleBoxes()">Boxes: ON</button>
+  <button id="toggleBtn" onclick="toggleBoxes()">Player Detection Boxes: ON</button>
 </div>
 <div id="player-wrap">
   <video id="vid" controls>
@@ -260,6 +260,16 @@ def build_player_html(video_url: str, frame_boxes: dict,
 
 
 # ─── UI ──────────────────────────────────────────────────────────────────────
+
+with st.sidebar:
+    st.header("Menu")
+    if st.button("Quit App", type="primary", use_container_width=True):
+        components.html(
+            "<script>window.top.close(); window.top.location.href='about:blank';</script>",
+            height=0,
+        )
+        time.sleep(0.3)
+        os._exit(0)
 
 uploaded_file = st.file_uploader("Upload a video", type=["mp4", "avi", "mov"])
 
