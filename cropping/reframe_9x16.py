@@ -10,6 +10,10 @@ from collections import defaultdict, deque
 import cv2
 import numpy as np
 from ultralytics import YOLO
+#! TODO: BYTETracker is imported from the external ByteTrack repo (yolox package),
+# which requires: yolox @ git+https://github.com/ifzhang/ByteTrack.git in requirements.txt
+# This could be migrated to Ultralytics' built-in ByteTrack via model.track(tracker="bytetrack.yaml"),
+# which would remove the external dependency entirely (see tests/player_tracking_test.py for reference).
 from yolox.tracker.byte_tracker import BYTETracker
 
 # ------------------ small helpers ------------------
