@@ -15,12 +15,8 @@
 #       Windows:  venv\Scripts\activate
 #       Mac/Linux: source venv/bin/activate
 #
-# 4. Install all dependencies (including ByteTrack from GitHub):
+# 4. Install all dependencies:
 #       pip install -r requirements.txt
-#
-#    Note: If the ByteTrack git install fails, clone manually:
-#       git clone https://github.com/ifzhang/ByteTrack.git
-#       cd ByteTrack && pip install -e . && cd ..
 #
 # 5. YOLOv8 weights are downloaded automatically on first run
 #    by the ultralytics package.
@@ -31,9 +27,9 @@ ultralytics==8.4.30
 opencv-python==4.13.0.92
 numpy==2.2.6
 
-# Tracking (ByteTrack — provides yolox.tracker.byte_tracker)
-# Used by: cropping/reframe_9x16.py, tests/track_test.py
-yolox @ git+https://github.com/ifzhang/ByteTrack.git
+# ByteTrack tracking is provided by ultralytics built-in tracker:
+#   model.track(tracker="bytetrack.yaml")
+# No separate yolox/ByteTrack package needed.
 
 # UI
 streamlit>=1.35.0

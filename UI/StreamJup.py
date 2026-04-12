@@ -3,6 +3,7 @@ import os
 os.environ["OPENCV_LOG_LEVEL"] = "SILENT"
 os.environ["OPENCV_FFMPEG_LOGLEVEL"] = "-8"  # AV_LOG_QUIET
 
+import atexit
 import functools
 import json
 import socket
@@ -24,24 +25,34 @@ st.title("Smart Vertical Basketball Streaming")
 # ─── Local video server ───────────────────────────────────────────────────────
 # Serves the rendered video file over HTTP so the browser can fetch it directly,
 # avoiding the Streamlit websocket size limit.
+#
+# Servers are keyed by label ("player" / "ball") so both can coexist without
+# one clobbering the other's temp file.
 
-_active_server: dict = {}   # holds {"server": HTTPServer, "path": str, "url": str}
+_active_servers: dict[str, dict] = {}  # label -> {"server": HTTPServer, "path": str}
+_rendered_paths: list[str] = []        # all temp files created this session
+
+def _cleanup_temp_files() -> None:
+    """Delete all rendered temp files — registered with atexit."""
+    for p in _rendered_paths:
+        try:
+            os.unlink(p)
+        except FileNotFoundError:
+            pass
+
+atexit.register(_cleanup_temp_files)
 
 def _free_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
         s.bind(("", 0))
         return s.getsockname()[1]
 
-def _start_video_server(video_path: str) -> str:
-    """Shut down any previous server, then serve video_path on a new port."""
-    global _active_server
-    if _active_server:
-        _active_server["server"].shutdown()
-        try:
-            os.unlink(_active_server["path"])
-        except FileNotFoundError:
-            pass
-        _active_server = {}
+def _start_video_server(video_path: str, label: str = "player") -> str:
+    """Shut down any previous server for this label, then serve video_path on a new port."""
+    global _active_servers
+    if label in _active_servers:
+        _active_servers[label]["server"].shutdown()
+        _active_servers.pop(label)
 
     directory = os.path.dirname(video_path)
     filename  = os.path.basename(video_path)
@@ -56,7 +67,7 @@ def _start_video_server(video_path: str) -> str:
     threading.Thread(target=server.serve_forever, daemon=True).start()
 
     url = f"http://localhost:{port}/{filename}"
-    _active_server = {"server": server, "path": video_path, "url": url}
+    _active_servers[label] = {"server": server, "path": video_path}
     return url
 
 
@@ -212,6 +223,7 @@ def render_video(frames, fps, label="Rendering video") -> str | None:
     out_tmp  = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
     out_path = out_tmp.name
     out_tmp.close()
+    _rendered_paths.append(out_path)
 
     fourcc = cv2.VideoWriter.fourcc(*"avc1")
     writer = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
@@ -503,12 +515,20 @@ uploaded_file = st.file_uploader("Upload a video", type=["mp4", "avi", "mov"])
 if uploaded_file:
     # Keep the tmp file alive across reruns so both detection buttons can use it
     if st.session_state.get("uploaded_name") != uploaded_file.name:
+        # Clean up previous upload temp
         old_tmp = st.session_state.get("tmp_path")
         if old_tmp and os.path.exists(old_tmp):
             os.unlink(old_tmp)
+        # Clean up any previously rendered output files
+        for key in ("video_path", "ball_video_path"):
+            old_rendered = st.session_state.pop(key, None)
+            if old_rendered and os.path.exists(old_rendered):
+                os.unlink(old_rendered)
+        st.session_state.pop("video_url", None)
+        st.session_state.pop("ball_video_url", None)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
             tmp.write(uploaded_file.read())
-            st.session_state.tmp_path     = tmp.name
+            st.session_state.tmp_path      = tmp.name
             st.session_state.uploaded_name = uploaded_file.name
 
     tmp_path = st.session_state.tmp_path
@@ -527,6 +547,8 @@ if uploaded_file:
             st.session_state.frame_h          = frame_h
             st.session_state.fps              = fps
             st.session_state.elapsed          = elapsed
+            # Invalidate cached render so the new detection results are used
+            st.session_state.pop("video_path", None)
             st.session_state.pop("video_url", None)
 
     with col2:
@@ -542,6 +564,8 @@ if uploaded_file:
             st.session_state.ball_frame_h       = ball_frame_h
             st.session_state.ball_fps           = ball_fps
             st.session_state.ball_elapsed       = ball_elapsed
+            # Invalidate cached render so the new detection results are used
+            st.session_state.pop("ball_video_path", None)
             st.session_state.pop("ball_video_url", None)
 
 # ─── Results ──────────────────────────────────────────────────────────────────
@@ -641,9 +665,15 @@ if has_player or has_ball:
 
         with tabs[tab_idx]:   # Player Play Video
             if st.button("Render & Play Player Video"):
-                video_path = render_video(clean_frames, fps, label="Rendering player video")
+                existing = st.session_state.get("video_path")
+                if existing and os.path.exists(existing):
+                    video_path = existing
+                else:
+                    video_path = render_video(clean_frames, fps, label="Rendering player video")
+                    if video_path is not None:
+                        st.session_state.video_path = video_path
                 if video_path is not None:
-                    url = _start_video_server(video_path)
+                    url = _start_video_server(video_path, label="player")
                     st.session_state.video_url = url
 
             if "video_url" in st.session_state:
@@ -658,9 +688,15 @@ if has_player or has_ball:
     if has_ball:
         with tabs[tab_idx]:   # Ball Play Video
             if st.button("Render & Play Ball Video"):
-                ball_video_path = render_video(ball_clean_frames, ball_fps, label="Rendering ball video")
+                existing = st.session_state.get("ball_video_path")
+                if existing and os.path.exists(existing):
+                    ball_video_path = existing
+                else:
+                    ball_video_path = render_video(ball_clean_frames, ball_fps, label="Rendering ball video")
+                    if ball_video_path is not None:
+                        st.session_state.ball_video_path = ball_video_path
                 if ball_video_path is not None:
-                    url = _start_video_server(ball_video_path)
+                    url = _start_video_server(ball_video_path, label="ball")
                     st.session_state.ball_video_url = url
 
             if "ball_video_url" in st.session_state:
