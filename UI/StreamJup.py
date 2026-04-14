@@ -14,6 +14,7 @@ import http.server
 
 import cv2
 import numpy as np
+from collections import deque
 import streamlit as st
 import streamlit.components.v1 as components
 from ultralytics import YOLO
@@ -87,6 +88,95 @@ def draw_boxes(frame, boxes, confidences):
         cv2.putText(frame, f"{conf:.0%}", (x1, y1 - 6),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
     return frame
+
+
+# ─── Smart Crop helpers (ported from smartCroppingVideos.py) ─────────────────
+
+_SC_BALL_MIN_PX   = 10
+_SC_BALL_MAX_PX   = 220
+_SC_BALL_MAX_ASP  = 1.6
+_SC_CONF          = 0.15
+_SC_IMGSZ         = 1280
+_SC_SMOOTH_LIVE   = 0.60
+_SC_SMOOTH_HOLD   = 0.98
+_SC_MAX_MOVE_LIVE = 120
+_SC_MAX_MOVE_HOLD = 10
+_SC_HISTORY_LEN   = 20
+_SC_MIN_HISTORY   = 5
+_SC_PRED_DECAY    = 0.90
+_SC_MAX_PRED_FR   = 25
+_SC_MAX_QUAD      = 0.08
+_SC_OUTLIER_BASE  = 180
+_SC_OUTLIER_WIDE  = 20
+_SC_OUTLIER_MAX   = 500
+_SC_WEIGHT_POW    = 2.0
+_SC_OUT_W, _SC_OUT_H = 540, 960
+
+
+def _sc_check_ball(x1, y1, x2, y2, fh):
+    bw, bh = x2 - x1, y2 - y1
+    if bw < _SC_BALL_MIN_PX or bh < _SC_BALL_MIN_PX:  return False
+    if bw > _SC_BALL_MAX_PX or bh > _SC_BALL_MAX_PX:  return False
+    if max(bw, bh) / max(min(bw, bh), 1) > _SC_BALL_MAX_ASP: return False
+    if (y1 + y2) / 2.0 < fh * 0.08:                   return False
+    return True
+
+
+class _BallTracker:
+    def __init__(self):
+        self.detections = deque(maxlen=_SC_HISTORY_LEN)
+        self.missed      = 0
+        self.last_conf   = 0.0
+        self._px = self._py = None
+        self._fit_frame  = -1
+
+    def update(self, frame_idx, cx, cy, conf):
+        self.detections.append((frame_idx, cx, cy))
+        self.missed      = 0
+        self.last_conf   = conf
+        self._fit_frame  = -1
+
+    def tick_miss(self):
+        self.missed += 1
+
+    def predict(self, frame_idx):
+        if len(self.detections) < _SC_MIN_HISTORY:
+            return None
+        if self.missed > _SC_MAX_PRED_FR:
+            d = self.detections[-1]
+            return float(d[1]), float(d[2]), -1.0
+        px, py = self._fit(frame_idx)
+        conf = _SC_PRED_DECAY ** self.missed
+        return float(np.polyval(px, frame_idx)), float(np.polyval(py, frame_idx)), conf
+
+    def is_outlier(self, cx, cy, frame_idx):
+        pred = self.predict(frame_idx)
+        if pred is None: return False
+        pcx, pcy, pconf = pred
+        if pconf == -1.0 or pconf < 0.2: return False
+        thresh = min(_SC_OUTLIER_BASE + self.missed * _SC_OUTLIER_WIDE, _SC_OUTLIER_MAX)
+        return float(np.hypot(cx - pcx, cy - pcy)) > thresh
+
+    def _fit(self, frame_idx):
+        if self._fit_frame == frame_idx and self._px is not None and self._py is not None:
+            return self._px, self._py
+        n  = len(self.detections)
+        fs = np.array([d[0] for d in self.detections], dtype=float)
+        xs = np.array([d[1] for d in self.detections], dtype=float)
+        ys = np.array([d[2] for d in self.detections], dtype=float)
+        w  = np.arange(1, n + 1, dtype=float) ** _SC_WEIGHT_POW
+        deg = 2 if (n >= 5 and self.missed <= _SC_MAX_PRED_FR) else 1
+        try:
+            px = np.polyfit(fs, xs, deg, w=w)
+            py = np.polyfit(fs, ys, deg, w=w)
+        except np.linalg.LinAlgError:
+            px = np.polyfit(fs, xs, 1, w=w)
+            py = np.polyfit(fs, ys, 1, w=w)
+        if deg == 2 and (abs(px[0]) > _SC_MAX_QUAD or abs(py[0]) > _SC_MAX_QUAD):
+            px = np.polyfit(fs, xs, 1, w=w)
+            py = np.polyfit(fs, ys, 1, w=w)
+        self._px, self._py, self._fit_frame = px, py, frame_idx
+        return px, py
 
 
 def kalman_filter():
@@ -213,6 +303,119 @@ def process_ball_video(video_path, model):
     progress.empty()
     return (clean_frames, frame_ball_boxes, frame_kalman,
             ball_counts, frame_w, frame_h, fps, time.time() - start)
+
+
+def process_smart_crop_video(video_path, model):
+    """Run smartCroppingVideos logic and return cropped frames + per-frame overlay data."""
+    ball_cls = [k for k, v in model.names.items() if v == "sports ball"][0]
+
+    cap          = cv2.VideoCapture(video_path)
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps          = cap.get(cv2.CAP_PROP_FPS) or 30
+
+    ret, frame = cap.read()
+    if not ret:
+        cap.release()
+        return None
+
+    h, w      = frame.shape[:2]
+    target_w  = min(int(round(h * 9 / 16)), w)
+    max_x     = w - target_w
+    half_w    = target_w / 2.0
+    cx_min, cx_max = half_w, w - half_w
+    sx = _SC_OUT_W / target_w   # scale from crop-window coords → 540×960
+    sy = _SC_OUT_H / h
+
+    cropped_frames        = []
+    frame_ball_boxes_crop = {}   # {str(i): [x1,y1,x2,y2,conf]} in 540×960 space
+    frame_pred_crop       = {}   # {str(i): [px,py]}             in 540×960 space
+
+    crop_cx = None
+    tracker = _BallTracker()
+    fidx    = 0
+
+    progress = st.progress(0, text="Running smart crop...")
+    start    = time.time()
+
+    while True:
+        if frame is None:
+            break
+
+        ball_box = None
+        live_cx  = None
+
+        res = model.predict(source=frame, imgsz=_SC_IMGSZ, conf=_SC_CONF,
+                            iou=0.4, verbose=False, classes=[ball_cls])
+        r = res[0]
+        if r.boxes is not None and len(r.boxes) > 0:
+            xyxy  = r.boxes.xyxy.cpu().numpy()   # type: ignore
+            confs = r.boxes.conf.cpu().numpy()   # type: ignore
+            good  = [i for i in range(len(xyxy))
+                     if _sc_check_ball(xyxy[i][0], xyxy[i][1], xyxy[i][2], xyxy[i][3], h)]
+            if good:
+                bi              = good[int(np.argmax(confs[good]))]
+                bx1, by1, bx2, by2 = xyxy[bi]
+                dcx, dcy, dcnf  = (bx1+bx2)/2.0, (by1+by2)/2.0, float(confs[bi])
+                if not tracker.is_outlier(dcx, dcy, fidx):
+                    ball_box = (bx1, by1, bx2, by2, dcnf)
+                    tracker.update(fidx, dcx, dcy, dcnf)
+                    live_cx = dcx
+                else:
+                    tracker.tick_miss()
+            else:
+                tracker.tick_miss()
+        else:
+            tracker.tick_miss()
+
+        if live_cx is not None:
+            sm, mm     = _SC_SMOOTH_LIVE, _SC_MAX_MOVE_LIVE
+            target_cx  = float(np.clip(live_cx, cx_min, cx_max))
+        else:
+            sm, mm     = _SC_SMOOTH_HOLD, _SC_MAX_MOVE_HOLD
+            target_cx  = crop_cx if crop_cx is not None else w / 2.0
+
+        if crop_cx is None:
+            crop_cx = target_cx
+        else:
+            new_cx = sm * crop_cx + (1 - sm) * target_cx
+            delta  = new_cx - crop_cx
+            if abs(delta) > mm:
+                new_cx = crop_cx + np.sign(delta) * mm
+            crop_cx = new_cx
+
+        cx1 = max(0, min(int(round(crop_cx - half_w)), max_x)) if max_x > 0 else 0
+
+        cropped = frame[:, cx1:cx1 + target_w]
+        resized = cv2.resize(cropped, (_SC_OUT_W, _SC_OUT_H))
+        cropped_frames.append(cv2.cvtColor(resized, cv2.COLOR_BGR2RGB))
+
+        if ball_box is not None:
+            bx1, by1, bx2, by2, bc = ball_box
+            frame_ball_boxes_crop[str(fidx)] = [
+                float((bx1 - cx1) * sx), float(by1 * sy),
+                float((bx2 - cx1) * sx), float(by2 * sy),
+                bc,
+            ]
+
+        pred = tracker.predict(fidx)
+        if pred is not None:
+            pcx, pcy, pcnf = pred
+            if pcnf == -1.0 or pcnf > 0.05:
+                frame_pred_crop[str(fidx)] = [float((pcx - cx1) * sx), float(pcy * sy)]
+
+        if total_frames > 0:
+            progress.progress(min((fidx + 1) / total_frames, 1.0),
+                              text=f"Frame {fidx+1}/{total_frames}")
+
+        ret, frame = cap.read()
+        if not ret:
+            break
+        fidx += 1
+
+    cap.release()
+    progress.empty()
+    return (cropped_frames, frame_ball_boxes_crop, frame_pred_crop,
+            fps, time.time() - start)
 
 
 def render_video(frames, fps, label="Rendering video") -> str | None:
@@ -498,6 +701,150 @@ def build_ball_html(video_url: str, frame_ball_boxes: dict, frame_kalman: dict,
 """
 
 
+def build_smart_crop_html(video_url: str, frame_ball_boxes: dict,
+                          frame_pred: dict, fps: float) -> str:
+    ball_json = json.dumps(frame_ball_boxes)
+    pred_json = json.dumps(frame_pred)
+    return f"""
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ background: #000; display: flex; flex-direction: column; align-items: center; }}
+
+  #controls {{
+    width: 100%;
+    max-width: 420px;
+    height: 44px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    background: #111;
+  }}
+  .toggleBtn {{
+    padding: 5px 14px;
+    font-size: 13px;
+    font-weight: bold;
+    border-radius: 6px;
+    cursor: pointer;
+  }}
+  #ballBoxBtn {{
+    border: 2px solid #ffff00;
+    background: #ffff00;
+    color: #000;
+  }}
+  #ballBoxBtn.off {{
+    background: #333;
+    border-color: #555;
+    color: #aaa;
+  }}
+  #predBtn {{
+    border: 2px solid #ff6400;
+    background: #ff6400;
+    color: #fff;
+  }}
+  #predBtn.off {{
+    background: #333;
+    border-color: #555;
+    color: #aaa;
+  }}
+  #player-wrap {{
+    position: relative;
+    width: 100%;
+    max-width: 420px;
+    background: #000;
+  }}
+  #vid {{
+    width: 100%;
+    height: auto;
+    display: block;
+  }}
+  #overlay {{
+    position: absolute;
+    top: 0; left: 0;
+    pointer-events: none;
+  }}
+</style>
+
+<div id="controls">
+  <button id="ballBoxBtn" class="toggleBtn" onclick="toggleBallBox()">Ball Box: ON</button>
+  <button id="predBtn"    class="toggleBtn" onclick="togglePred()">Tracker Prediction: ON</button>
+</div>
+<div id="player-wrap">
+  <video id="vid" controls>
+    <source src="{video_url}" type="video/mp4">
+  </video>
+  <canvas id="overlay"></canvas>
+</div>
+
+<script>
+  const BALL_BOXES = {ball_json};
+  const PRED       = {pred_json};
+  const FPS        = {fps};
+  let showBallBox = true;
+  let showPred    = true;
+
+  const vid    = document.getElementById('vid');
+  const canvas = document.getElementById('overlay');
+  const ctx    = canvas.getContext('2d');
+
+  function resizeCanvas() {{
+    canvas.width        = vid.clientWidth;
+    canvas.height       = vid.clientHeight;
+    canvas.style.width  = vid.clientWidth  + 'px';
+    canvas.style.height = vid.clientHeight + 'px';
+  }}
+
+  function drawFrame() {{
+    resizeCanvas();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const frameIdx = String(Math.floor(vid.currentTime * FPS));
+    // video is 540×960; scale canvas coords accordingly
+    const scaleX   = canvas.width  / 540;
+    const scaleY   = canvas.height / 960;
+
+    if (showBallBox && BALL_BOXES[frameIdx]) {{
+      const [x1, y1, x2, y2, conf] = BALL_BOXES[frameIdx];
+      ctx.strokeStyle = '#ffff00';
+      ctx.lineWidth   = 3;
+      ctx.strokeRect(x1*scaleX, y1*scaleY, (x2-x1)*scaleX, (y2-y1)*scaleY);
+      ctx.fillStyle = '#ffff00';
+      ctx.font      = 'bold 13px sans-serif';
+      ctx.fillText(Math.round(conf*100) + '%', x1*scaleX + 2, Math.max(14, y1*scaleY - 4));
+    }}
+
+    if (showPred && PRED[frameIdx]) {{
+      const [px, py] = PRED[frameIdx];
+      ctx.strokeStyle = '#ff6400';
+      ctx.lineWidth   = 2;
+      ctx.beginPath();
+      ctx.arc(px*scaleX, py*scaleY, 14, 0, 2*Math.PI);
+      ctx.stroke();
+    }}
+
+    requestAnimationFrame(drawFrame);
+  }}
+
+  function toggleBallBox() {{
+    showBallBox = !showBallBox;
+    const btn = document.getElementById('ballBoxBtn');
+    btn.textContent = 'Ball Box: ' + (showBallBox ? 'ON' : 'OFF');
+    btn.classList.toggle('off', !showBallBox);
+  }}
+
+  function togglePred() {{
+    showPred = !showPred;
+    const btn = document.getElementById('predBtn');
+    btn.textContent = 'Tracker Prediction: ' + (showPred ? 'ON' : 'OFF');
+    btn.classList.toggle('off', !showPred);
+  }}
+
+  vid.addEventListener('loadedmetadata', () => {{ resizeCanvas(); drawFrame(); }});
+  window.addEventListener('resize', resizeCanvas);
+</script>
+"""
+
+
 # ─── UI ──────────────────────────────────────────────────────────────────────
 
 with st.sidebar:
@@ -520,12 +867,13 @@ if uploaded_file:
         if old_tmp and os.path.exists(old_tmp):
             os.unlink(old_tmp)
         # Clean up any previously rendered output files
-        for key in ("video_path", "ball_video_path"):
+        for key in ("video_path", "ball_video_path", "smart_crop_video_path"):
             old_rendered = st.session_state.pop(key, None)
             if old_rendered and os.path.exists(old_rendered):
                 os.unlink(old_rendered)
         st.session_state.pop("video_url", None)
         st.session_state.pop("ball_video_url", None)
+        st.session_state.pop("smart_crop_video_url", None)
         with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as tmp:
             tmp.write(uploaded_file.read())
             st.session_state.tmp_path      = tmp.name
@@ -533,7 +881,7 @@ if uploaded_file:
 
     tmp_path = st.session_state.tmp_path
 
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         if st.button("Run Player Detection", type="primary", use_container_width=True):
             (clean_frames, annotated_frames, counts,
@@ -568,12 +916,29 @@ if uploaded_file:
             st.session_state.pop("ball_video_path", None)
             st.session_state.pop("ball_video_url", None)
 
+    with col3:
+        if st.button("Run Smart Crop", type="primary", use_container_width=True):
+            result = process_smart_crop_video(tmp_path, load_model())
+            if result is not None:
+                (sc_frames, sc_ball_boxes, sc_pred,
+                 sc_fps, sc_elapsed) = result
+
+                st.session_state.sc_frames     = sc_frames
+                st.session_state.sc_ball_boxes = sc_ball_boxes
+                st.session_state.sc_pred       = sc_pred
+                st.session_state.sc_fps        = sc_fps
+                st.session_state.sc_elapsed    = sc_elapsed
+                # Invalidate cached render so the new results are used
+                st.session_state.pop("smart_crop_video_path", None)
+                st.session_state.pop("smart_crop_video_url", None)
+
 # ─── Results ──────────────────────────────────────────────────────────────────
 
-has_player = "annotated_frames" in st.session_state
-has_ball   = "frame_ball_boxes" in st.session_state
+has_player     = "annotated_frames" in st.session_state
+has_ball       = "frame_ball_boxes" in st.session_state
+has_smart_crop = "sc_frames"        in st.session_state
 
-if has_player or has_ball:
+if has_player or has_ball or has_smart_crop:
     if has_player:
         annotated_frames = st.session_state.annotated_frames
         clean_frames     = st.session_state.clean_frames
@@ -612,6 +977,16 @@ if has_player or has_ball:
         col2.metric("Frames with ball", frames_with_ball)
         col3.metric("Detection rate",   f"{detection_rate:.1f}%")
 
+    if has_smart_crop:
+        sc_elapsed = st.session_state.sc_elapsed
+        sc_frames  = st.session_state.sc_frames
+
+        st.subheader("Smart Crop")
+        st.success(f"Processed {len(sc_frames)} frames in {sc_elapsed:.1f}s ({sc_elapsed/60:.1f} min)")
+        col1, col2 = st.columns(2)
+        col1.metric("Total frames",  len(sc_frames))
+        col2.metric("Output size",   f"{_SC_OUT_W}×{_SC_OUT_H}")
+
     st.divider()
 
     # Build tab list dynamically based on what results are available
@@ -620,6 +995,8 @@ if has_player or has_ball:
         tab_names += ["Frame Scrubber", "Player Play Video"]
     if has_ball:
         tab_names += ["Ball Play Video"]
+    if has_smart_crop:
+        tab_names += ["Smart Crop Video"]
 
     tabs     = st.tabs(tab_names)
     tab_idx  = 0
@@ -707,6 +1084,35 @@ if has_player or has_ball:
                 )
                 video_display_h = int(1400 * ball_frame_h / ball_frame_w)
                 components.html(html, height=video_display_h + 80, scrolling=False)
+        tab_idx += 1
+
+    if has_smart_crop:
+        with tabs[tab_idx]:   # Smart Crop Video
+            sc_frames     = st.session_state.sc_frames
+            sc_ball_boxes = st.session_state.sc_ball_boxes
+            sc_pred       = st.session_state.sc_pred
+            sc_fps        = st.session_state.sc_fps
+
+            if st.button("Render & Play Smart Crop Video"):
+                existing = st.session_state.get("smart_crop_video_path")
+                if existing and os.path.exists(existing):
+                    sc_video_path = existing
+                else:
+                    sc_video_path = render_video(sc_frames, sc_fps,
+                                                 label="Rendering smart crop video")
+                    if sc_video_path is not None:
+                        st.session_state.smart_crop_video_path = sc_video_path
+                if sc_video_path is not None:
+                    url = _start_video_server(sc_video_path, label="smart_crop")
+                    st.session_state.smart_crop_video_url = url
+
+            if "smart_crop_video_url" in st.session_state:
+                html = build_smart_crop_html(
+                    st.session_state.smart_crop_video_url,
+                    sc_ball_boxes, sc_pred, sc_fps
+                )
+                # Vertical video (9:16): fix a comfortable display height
+                components.html(html, height=850, scrolling=False)
 
 else:
     st.info("Upload a video to get started.")
