@@ -1,0 +1,25 @@
+The  freframe 9x16 may not be neccessary and can be removed
+
+Ball Framing integration can run on its own and is tested.
+
+
+Currently player detection, ball detection, and smart cropping are in the UI
+The issue is that the logic was copy and pasted and not imported. Leading to 1000+ lines
+
+
+TODO
+1. Refactor the code
+- Player detection logic from player_tracking should go into its own file.
+The logic in the UI is doing YOLO detection, not the code from the player detection team
+- Adjust ball detection code so that it is in its own file
+- Adjust the code so the smart cropping also comes from its own file
+- Ideally this should reduce the amount of lines of code
+
+2. Create a script that downloads the videos that would be used.
+This allows the videos we are testing to be in the videos folder but isnt tracked by Git
+
+3. Remove unneccessary files
+-   runs folder can be removed
+- reframe may be removed
+
+4. After refactoring code, have it all be in a main.py file for a more streamlined running process
