@@ -46,6 +46,7 @@ Thumbs.db
 *.jpg
 *.jpeg
 *.png
+*.mp4
 
 # Model weights (project-specific)
 *.pt
