@@ -1,34 +1,125 @@
 Disney SD Smart Vertical Streaming — Project Documentation
 ==========================================================
 
+PROJECT OVERVIEW
+----------------
+Disney Senior Design Project: Smart Vertical Basketball Streaming
+Primary goal: Automatically reframe landscape basketball video to 9:16 vertical format
+using YOLOv8 detection + ByteTrack multi-object tracking (via ultralytics).
+
+Three core features are exposed through the Streamlit UI:
+  1. Player Detection  — detects and tracks people with bounding boxes + IDs
+  2. Ball Detection    — detects the basketball using YOLO + Kalman filter smoothing
+  3. Smart Crop        — auto-reframes the video to 9:16 following the ball
+
+
 PROJECT STRUCTURE
 -----------------
 Disney-SD-Smart-Vertical-Streaming/
 ├── UI/
-│   └── StreamJup.py              # Main Streamlit app (YOLOv8 person detection UI)
+│   ├── StreamJup.py          # Main Streamlit app — entry point for the UI
+│   ├── detection.py          # Processing engine: process_video, process_ball_video,
+│   │                         #   process_smart_crop_video. Imports utilities from
+│   │                         #   cropping/smartCroppingVideos.py and
+│   │                         #   detection/ball-detection/ball_detection.py
+│   ├── html_builders.py      # Builds HTML/JS video player pages (player, ball, smart crop)
+│   └── video_utils.py        # render_video() and _start_video_server() — writes frames
+│                             #   to a temp H.264 MP4 and serves it over HTTP with
+│                             #   range-request support for browser video seeking
 ├── cropping/
-│   ├── read-and-crop.py          # Basic video read and crop
-│   ├── reframe_9x16.py           # 9:16 auto-reframing with ByteTrack (ultralytics)
-│   ├── smartCroppingImages.py    # Image-based smart cropping with ball tracking
-│   └── smartCroppingVideos.py    # Video smart cropping with ball tracking
-├── testing/
-│   └── ball_framing_integration.py  # Integrated ball + player detection (experimental)
+│   ├── smartCroppingVideos.py  # BallTracker class, check_ball(), tuning constants
+│   │                           #   (cropped_width/height, smoothing params). Imported
+│   │                           #   by UI/detection.py. Also runnable standalone.
+│   ├── smartCroppingImages.py  # Image-based smart cropping (standalone)
+│   ├── reframe_9x16.py         # Earlier 9:16 reframing prototype (may be removed)
+│   └── read-and-crop.py        # Basic video read and crop utility
+├── detection/
+│   ├── ball-detection/
+│   │   └── ball_detection.py   # kalman_filter() factory + standalone ball detection
+│   │                           #   script with cv2 window output. kalman_filter()
+│   │                           #   is imported by UI/detection.py.
+│   └── player-detection/
+│       └── player_detection.py # Standalone player tracking script — reads from
+│                               #   videos/, writes annotated MP4 to output/,
+│                               #   shows live cv2 window. NOT imported by the UI.
 ├── tests/
-│   ├── ball_detector_test.py     # Ball detection tests (COCO class 32)
-│   ├── player_tracking_test.py   # Player tracking via YOLOv8 + ByteTrack
-│   └── read_and_crop_test.py     # Read/crop pipeline tests
+│   ├── ball_detector_test.py
+│   ├── ball_framing_integration_test.py
+│   ├── player_tracking_test.py
+│   └── read_and_crop_test.py
 ├── models/
-│   ├── yolov8n.pt                # YOLOv8 nano weights
-│   ├── yolov8s.pt                # YOLOv8 small weights
-│   └── yolov8m.pt                # YOLOv8 medium weights (Currently used by UI)
-├── videos/                       # Input test videos
-├── output/                       # Generated output videos
-├── runs/                         # YOLO run outputs (auto-generated from ball detection tests, git-ignored)
-├── sd_disney/                    # Python virtual environment
+│   ├── yolov8n.pt              # YOLOv8 nano weights
+│   ├── yolov8s.pt              # YOLOv8 small weights
+│   └── yolov8m.pt              # YOLOv8 medium weights (used by the UI)
+├── videos/                     # Input test videos (git-ignored)
+├── output/                     # Output videos from standalone scripts
+├── sd_disney/                  # Python virtual environment (git-ignored)
 ├── README.md
 ├── requirements.txt
-├── run_ui.bat                    # One-click script to launch the UI
+├── run_ui.bat                  # One-click launcher for the Streamlit UI
+├── tasks.txt                   # Outstanding TODOs and project notes
 └── Documentation.txt
+
+
+UI MODULE BREAKDOWN
+-------------------
+StreamJup.py
+  - Handles file upload, session state, button layout, metrics display, and tabs.
+  - Calls the three process_* functions from detection.py on button click.
+  - Uses html_builders.py to embed the video player into an iframe.
+  - Uses video_utils.py to encode and serve the processed video.
+
+detection.py
+  - process_video(video_path, model)
+      Runs YOLOv8 + ByteTrack on every frame (classes=[0], person only).
+      Returns clean frames, annotated frames, per-frame counts, bounding boxes,
+      video dimensions, fps, and elapsed time.
+  - process_ball_video(video_path, model)
+      Runs YOLOv8 predict for the sports ball class with Kalman filter smoothing.
+      Returns clean frames, per-frame ball boxes, Kalman predictions, counts,
+      video dimensions, fps, and elapsed time.
+  - process_smart_crop_video(video_path, model)
+      Runs ball detection frame-by-frame, smooths the crop center with
+      BallTracker, and returns cropped 9:16 frames in cropped_width x cropped_height
+      (540x960) space along with ball boxes and predictions.
+  - Dynamically loads smartCroppingVideos.py and ball_detection.py at import time
+    using importlib so they can live outside the UI/ directory.
+
+html_builders.py
+  - build_player_html(url, frame_boxes, frame_w, frame_h, fps)
+      HTML5 video + canvas overlay with requestAnimationFrame loop.
+      Player bounding box data is embedded as JSON; toggled via checkbox.
+  - build_ball_html(url, frame_ball_boxes, frame_kalman, frame_w, frame_h, fps)
+      Same structure, draws ball detection box and Kalman prediction circle.
+  - build_smart_crop_html(url, sc_ball_boxes, sc_pred, fps)
+      Cropped 9:16 video player with ball box and prediction overlays.
+
+video_utils.py
+  - render_video(frames, fps, label) -> str
+      Encodes a list of RGB frames to a temp H.264 (avc1) MP4 file using
+      OpenCV VideoWriter. Returns the file path.
+  - _start_video_server(video_path, label) -> str
+      Shuts down any existing server for that label, starts a new
+      HTTPServer on a random port serving the video directory.
+      Supports HTTP range requests so browsers can seek without
+      downloading the whole file. Silences ConnectionResetError noise
+      caused by browsers closing connections early.
+
+
+STANDALONE SCRIPTS
+------------------
+detection/player-detection/player_detection.py
+  - Run directly to process all videos in videos/ and save annotated MP4s to output/.
+  - Shows a live cv2 window during processing.
+  - Uses ByteTrack (model.track tracker="bytetrack.yaml").
+
+detection/ball-detection/ball_detection.py
+  - Run directly for ball detection with Kalman filter overlay in a cv2 window.
+  - kalman_filter() is also imported by the UI via detection.py.
+
+cropping/smartCroppingVideos.py
+  - Run directly to produce smart-cropped 9:16 output videos and debug overlays.
+  - BallTracker, check_ball(), and tuning constants are imported by the UI.
 
 
 SETUP
@@ -54,87 +145,39 @@ RUNNING THE UI
 From the project root, double-click or run:
       .\run_ui.bat
 
-This launches StreamJup.py via Streamlit without needing to cd into the UI folder.
+This launches UI/StreamJup.py via Streamlit.
 
-If the .bat launchers are broken (stale venv path), bypass them with:
+If the .bat launcher is broken (stale venv path), run manually:
       & ".\sd_disney\Scripts\python.exe" -m streamlit run UI\StreamJup.py
 
 
 KEY DEPENDENCIES
 ----------------
-- ultralytics    — YOLOv8 model inference + built-in ByteTrack multi-object tracking
-- opencv-python  — Video reading and frame processing
-- streamlit      — Web UI
-- scipy          — Gaussian filtering and numerical functions
-- numpy, tqdm, kagglehub
+- ultralytics    — YOLOv8 inference + ByteTrack tracker (model.track / model.predict)
+- opencv-python  — Video I/O, frame processing, Kalman filter, H.264 encoding
+- streamlit      — Web UI framework
+- numpy          — Array math, polynomial fitting (ball trajectory)
+- torch          — CUDA device detection (used by standalone scripts)
+- tqdm           — Progress bars in standalone scripts
+- scipy, kagglehub
 
----------------------------------------------------
-Summary
 
-Smart Vertical Basketball Streaming - Session Summary
-======================================================
+KNOWN ISSUES / PENDING WORK
+----------------------------
+- Pylance reports "unknown import symbol" for detection.py imports in StreamJup.py.
+  Root cause: the detection/ folder at the project root shadows UI/detection.py
+  for the static analyzer. Runtime is unaffected (Streamlit adds UI/ to sys.path).
+  Fix: add a pyrightconfig.json at the project root with { "extraPaths": ["UI"] },
+  or move detection/ball-detection and detection/player-detection to the root so
+  the detection/ folder no longer exists.
 
-PROJECT OVERVIEW
-----------------
-Disney Senior Design Project: Smart Vertical Basketball Streaming
-Primary goal: Automatically reframe landscape basketball video to 9:16 vertical format using YOLO detection + built-in ByteTrack tracking (via ultralytics).
+- reframe_9x16.py may be obsolete now that smart cropping is in the UI; can be removed.
 
-FILES MODIFIED / CREATED
--------------------------
-- UI/StreamJup.py                   -> Main Streamlit UI (active file)
-- run_ui.bat                        -> Launches StreamJup.py via sd_disney virtual environment
-- testing/ball_framing_integration.py -> Diagnosed but not modified (ball detection issue)
+- The ABC logo is occasionally misdetected as a sports ball (COCO class 32) by the
+  general-purpose yolov8m model. Proposed fixes:
+    a) Raise confidence threshold above 0.20
+    b) Add a spatial exclusion zone for the logo area
+    c) Use a sports-specific fine-tuned YOLO model
 
-FEATURES IMPLEMENTED IN StreamJup.py
---------------------------------------
-1. Video upload via Streamlit file uploader
-2. YOLO person detection (yolov8m.pt, class 0, conf=0.50, iou=0.95)
-3. Frame Scrubber tab - slider to browse frames with detection overlay
-4. Play Video tab:
-   - Renders clean frames to H.264 (avc1) MP4 via OpenCV VideoWriter
-   - Serves video over a local HTTP server (avoids Streamlit 200MB websocket limit)
-   - HTML5 <video> + <canvas> overlay with requestAnimationFrame loop
-   - Per-frame bounding box data embedded as JSON in the HTML
-   - Toggle button to show/hide boxes during playback (no page reload)
-5. Metrics: total frames, avg people/frame, peak people
-
-BUGS FIXED DURING SESSION
---------------------------
-1.  Play Video button not visible        -> Switched from radio buttons to st.tabs
-2.  Video not playing (black player)     -> Switched from mp4v to avc1 (H.264) codec
-3.  FileNotFoundError for ffmpeg         -> Removed subprocess; avc1 works natively on Windows 10
-4.  use_container_width deprecation      -> Replaced with width='stretch' throughout
-5.  Websocket 200MB limit exceeded       -> Replaced base64 embedding with local HTTP server
-6.  Video letterboxed / boxes misaligned -> Changed CSS from object-fit:contain to width:100%; height:auto
-7.  Toggle button cut off at bottom      -> Moved controls div above player-wrap
-8.  iframe too short (video cut off)     -> Changed container width estimate from 900px to 1400px
-9.  OpenH264 terminal warnings           -> Added OPENCV_LOG_LEVEL and OPENCV_FFMPEG_LOGLEVEL env vars
-10. Temp video files accumulating on disk (OS temp dir filling up):
-    - "Render & Play" re-encoded the full video to a new temp file on every click
-    - Player and ball video servers shared a single _active_server dict, so starting
-      one would delete the other's temp file (causing a broken player on re-open)
-    - No cleanup occurred on new video upload or app exit
-    Fix: cache rendered file path in session_state and reuse it on repeat clicks;
-    split _active_server into _active_servers keyed by label ("player"/"ball");
-    delete old rendered files on new upload; atexit handler cleans up all temp
-    files when the process exits.
-
-KNOWN / PENDING ISSUES
------------------------
-- Ball detection (testing/ball_framing_integration.py): yolov8m.pt general COCO model
-  misidentifies the ABC logo as a sports ball (class 32). Proposed fixes:
-  a) Increase CONFIDENCE_THRESHOLD (currently 0.20)
-  b) Add region exclusion for logo area
-  c) Use a sports-specific fine-tuned YOLO model
-  No code changes made yet; awaiting implementation
-
-- iframe height fix (1400px estimate) may still clip video bottom on very wide/tall displays.
-  If still cut off, increase estimate to 1600px or implement dynamic height via JS postMessage.
-
-TECH STACK
-----------
-- Python 3.x, OpenCV 4.13, YOLOv8 (ultralytics 8.4.30), NumPy 2.2.6
-- Streamlit >= 1.35.0, SciPy, tqdm
-- ByteTrack via ultralytics built-in tracker (model.track(tracker="bytetrack.yaml"))
-- HTML5 Canvas API, requestAnimationFrame, Python http.server (threading)
-- Virtual env: sd_disney (Windows, located at repo root)
+- player_detection.py (standalone) is not imported by the UI. The UI's process_video()
+  reimplements the same ByteTrack logic directly. These could be unified.
