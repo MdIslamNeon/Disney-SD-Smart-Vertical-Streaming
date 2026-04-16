@@ -3,73 +3,22 @@ import os
 os.environ["OPENCV_LOG_LEVEL"] = "SILENT"
 os.environ["OPENCV_FFMPEG_LOGLEVEL"] = "-8"  # AV_LOG_QUIET
 
-import atexit
-import functools
-import json
-import socket
 import tempfile
-import threading
 import time
-import http.server
 
 import cv2
 import numpy as np
-from collections import deque
 import streamlit as st
 import streamlit.components.v1 as components
 from ultralytics import YOLO
 
+#? Pylance throws error but still works
+from detection import (process_video, process_ball_video, process_smart_crop_video, cropped_width, cropped_height) # type: ignore
+from html_builders import build_player_html, build_ball_html, build_smart_crop_html
+from video_utils import render_video, _start_video_server
+
 st.set_page_config(page_title="Smart Vertical Basketball Streaming", layout="wide", initial_sidebar_state="collapsed")
 st.title("Smart Vertical Basketball Streaming")
-
-
-# ─── Local video server ───────────────────────────────────────────────────────
-# Serves the rendered video file over HTTP so the browser can fetch it directly,
-# avoiding the Streamlit websocket size limit.
-#
-# Servers are keyed by label ("player" / "ball") so both can coexist without
-# one clobbering the other's temp file.
-
-_active_servers: dict[str, dict] = {}  # label -> {"server": HTTPServer, "path": str}
-_rendered_paths: list[str] = []        # all temp files created this session
-
-def _cleanup_temp_files() -> None:
-    """Delete all rendered temp files — registered with atexit."""
-    for p in _rendered_paths:
-        try:
-            os.unlink(p)
-        except FileNotFoundError:
-            pass
-
-atexit.register(_cleanup_temp_files)
-
-def _free_port() -> int:
-    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-        s.bind(("", 0))
-        return s.getsockname()[1]
-
-def _start_video_server(video_path: str, label: str = "player") -> str:
-    """Shut down any previous server for this label, then serve video_path on a new port."""
-    global _active_servers
-    if label in _active_servers:
-        _active_servers[label]["server"].shutdown()
-        _active_servers.pop(label)
-
-    directory = os.path.dirname(video_path)
-    filename  = os.path.basename(video_path)
-    port      = _free_port()
-
-    class _QuietHandler(http.server.SimpleHTTPRequestHandler):
-        def log_message(self, *_):
-            pass  # silence request logs
-
-    handler = functools.partial(_QuietHandler, directory=directory)
-    server = http.server.HTTPServer(("localhost", port), handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
-
-    url = f"http://localhost:{port}/{filename}"
-    _active_servers[label] = {"server": server, "path": video_path}
-    return url
 
 
 # ─── Model ───────────────────────────────────────────────────────────────────
@@ -79,776 +28,7 @@ def load_model():
     return YOLO("../models/yolov8m.pt")
 
 
-# ─── Helpers ─────────────────────────────────────────────────────────────────
-
-def draw_tracked_boxes(frame, boxes, track_ids):
-    for box, tid in zip(boxes, track_ids):
-        x1, y1, x2, y2 = map(int, box)
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        cv2.putText(frame, f"ID {int(tid)}", (x1, max(0, y1 - 6)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-    return frame
-
-
-# ─── Smart Crop helpers (ported from smartCroppingVideos.py) ─────────────────
-
-_SC_BALL_MIN_PX   = 10
-_SC_BALL_MAX_PX   = 220
-_SC_BALL_MAX_ASP  = 1.6
-_SC_CONF          = 0.15
-_SC_IMGSZ         = 1280
-_SC_SMOOTH_LIVE   = 0.60
-_SC_SMOOTH_HOLD   = 0.98
-_SC_MAX_MOVE_LIVE = 120
-_SC_MAX_MOVE_HOLD = 10
-_SC_HISTORY_LEN   = 20
-_SC_MIN_HISTORY   = 5
-_SC_PRED_DECAY    = 0.90
-_SC_MAX_PRED_FR   = 25
-_SC_MAX_QUAD      = 0.08
-_SC_OUTLIER_BASE  = 180
-_SC_OUTLIER_WIDE  = 20
-_SC_OUTLIER_MAX   = 500
-_SC_WEIGHT_POW    = 2.0
-_SC_OUT_W, _SC_OUT_H = 540, 960
-
-
-def _sc_check_ball(x1, y1, x2, y2, fh):
-    bw, bh = x2 - x1, y2 - y1
-    if bw < _SC_BALL_MIN_PX or bh < _SC_BALL_MIN_PX:  return False
-    if bw > _SC_BALL_MAX_PX or bh > _SC_BALL_MAX_PX:  return False
-    if max(bw, bh) / max(min(bw, bh), 1) > _SC_BALL_MAX_ASP: return False
-    if (y1 + y2) / 2.0 < fh * 0.08:                   return False
-    return True
-
-
-class _BallTracker:
-    def __init__(self):
-        self.detections = deque(maxlen=_SC_HISTORY_LEN)
-        self.missed      = 0
-        self.last_conf   = 0.0
-        self._px = self._py = None
-        self._fit_frame  = -1
-
-    def update(self, frame_idx, cx, cy, conf):
-        self.detections.append((frame_idx, cx, cy))
-        self.missed      = 0
-        self.last_conf   = conf
-        self._fit_frame  = -1
-
-    def tick_miss(self):
-        self.missed += 1
-
-    def predict(self, frame_idx):
-        if len(self.detections) < _SC_MIN_HISTORY:
-            return None
-        if self.missed > _SC_MAX_PRED_FR:
-            d = self.detections[-1]
-            return float(d[1]), float(d[2]), -1.0
-        px, py = self._fit(frame_idx)
-        conf = _SC_PRED_DECAY ** self.missed
-        return float(np.polyval(px, frame_idx)), float(np.polyval(py, frame_idx)), conf
-
-    def is_outlier(self, cx, cy, frame_idx):
-        pred = self.predict(frame_idx)
-        if pred is None: return False
-        pcx, pcy, pconf = pred
-        if pconf == -1.0 or pconf < 0.2: return False
-        thresh = min(_SC_OUTLIER_BASE + self.missed * _SC_OUTLIER_WIDE, _SC_OUTLIER_MAX)
-        return float(np.hypot(cx - pcx, cy - pcy)) > thresh
-
-    def _fit(self, frame_idx):
-        if self._fit_frame == frame_idx and self._px is not None and self._py is not None:
-            return self._px, self._py
-        n  = len(self.detections)
-        fs = np.array([d[0] for d in self.detections], dtype=float)
-        xs = np.array([d[1] for d in self.detections], dtype=float)
-        ys = np.array([d[2] for d in self.detections], dtype=float)
-        w  = np.arange(1, n + 1, dtype=float) ** _SC_WEIGHT_POW
-        deg = 2 if (n >= 5 and self.missed <= _SC_MAX_PRED_FR) else 1
-        try:
-            px = np.polyfit(fs, xs, deg, w=w)
-            py = np.polyfit(fs, ys, deg, w=w)
-        except np.linalg.LinAlgError:
-            px = np.polyfit(fs, xs, 1, w=w)
-            py = np.polyfit(fs, ys, 1, w=w)
-        if deg == 2 and (abs(px[0]) > _SC_MAX_QUAD or abs(py[0]) > _SC_MAX_QUAD):
-            px = np.polyfit(fs, xs, 1, w=w)
-            py = np.polyfit(fs, ys, 1, w=w)
-        self._px, self._py, self._fit_frame = px, py, frame_idx
-        return px, py
-
-
-def kalman_filter():
-    kf = cv2.KalmanFilter(4, 2)
-    kf.measurementMatrix = np.array([[1, 0, 0, 0], [0, 1, 0, 0]], np.float32)
-    kf.transitionMatrix  = np.array([[1, 0, 1, 0], [0, 1, 0, 1],
-                                      [0, 0, 1, 0], [0, 0, 0, 1]], np.float32)
-    kf.processNoiseCov     = np.eye(4, dtype=np.float32) * 0.06
-    kf.measurementNoiseCov = np.eye(2, dtype=np.float32) * 0.3
-    kf.errorCovPost        = np.eye(4, dtype=np.float32)
-    return kf
-
-
-def process_video(video_path, model):
-    cap          = cv2.VideoCapture(video_path)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps          = cap.get(cv2.CAP_PROP_FPS)
-    frame_w      = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    frame_h      = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    cap.release()
-
-    clean_frames     = []
-    annotated_frames = []
-    frame_counts     = []
-    frame_boxes      = {}     # {frame_index: [[x1,y1,x2,y2,track_id], ...]}
-    progress         = st.progress(0, text="Running player detection...")
-    start            = time.time()
-
-    for i, result in enumerate(model.track(
-            source=video_path, classes=[0], stream=True,
-            imgsz=416, conf=0.35, iou=0.8,
-            persist=True, tracker="bytetrack.yaml", verbose=False)):
-        frame_rgb  = cv2.cvtColor(result.orig_img, cv2.COLOR_BGR2RGB)
-        boxes      = result.boxes.xyxy.cpu().numpy() if result.boxes else np.empty((0, 4))
-        track_ids  = (result.boxes.id.cpu().numpy()
-                      if result.boxes is not None and result.boxes.id is not None
-                      else np.zeros(len(boxes)))
-
-        clean_frames.append(frame_rgb.copy())
-        annotated_frames.append(draw_tracked_boxes(frame_rgb.copy(), boxes, track_ids))
-        frame_counts.append(int(len(boxes)))
-
-        if len(boxes):
-            frame_boxes[str(i)] = [
-                [float(x1), float(y1), float(x2), float(y2), int(tid)]
-                for (x1, y1, x2, y2), tid in zip(boxes, track_ids)
-            ]
-
-        if total_frames > 0:
-            progress.progress(min((i + 1) / total_frames, 1.0),
-                              text=f"Frame {i+1}/{total_frames} — {len(boxes)} people detected")
-
-    progress.empty()
-    return (clean_frames, annotated_frames, frame_counts,
-            frame_boxes, frame_w, frame_h, fps, time.time() - start)
-
-
-def process_ball_video(video_path, model):
-    ball_class_id = [k for k, v in model.names.items() if v == "sports ball"][0]
-
-    cap          = cv2.VideoCapture(video_path)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps          = cap.get(cv2.CAP_PROP_FPS)
-    frame_w      = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-    frame_h      = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    cap.release()
-
-    kf             = kalman_filter()
-    kf_initialized = False
-
-    clean_frames     = []
-    frame_ball_boxes = {}   # {str(i): [x1, y1, x2, y2, conf]}
-    frame_kalman     = {}   # {str(i): [px, py]}
-    ball_counts      = []
-
-    progress = st.progress(0, text="Running ball detection...")
-    start    = time.time()
-
-    for i, result in enumerate(model.predict(
-            source=video_path, classes=[ball_class_id], stream=True,
-            save=False, conf=0.20, iou=0.4, imgsz=768)):
-        frame_rgb = cv2.cvtColor(result.orig_img, cv2.COLOR_BGR2RGB)
-        clean_frames.append(frame_rgb.copy())
-
-        # Always predict first — matches ball_detector_test.py logic
-        pred = kf.predict()
-        px, py = float(pred[0]), float(pred[1])
-
-        have_det = False
-        if result.boxes is not None and len(result.boxes) > 0:
-            confs   = result.boxes.conf.cpu().numpy()   # type: ignore[union-attr]
-            classes = result.boxes.cls.cpu().numpy()    # type: ignore[union-attr]
-
-            idx = int(np.argmax(confs))
-            if int(classes[idx]) == ball_class_id:
-                xyxy = result.boxes.xyxy[idx].cpu().numpy()  # type: ignore[union-attr]
-                x1, y1, x2, y2 = float(xyxy[0]), float(xyxy[1]), float(xyxy[2]), float(xyxy[3])
-                conf = float(confs[idx])
-                cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-
-                measurement = np.array([[np.float32(cx)], [np.float32(cy)]])
-                if not kf_initialized:
-                    kf.statePre[:2]  = measurement
-                    kf.statePost[:2] = measurement
-                    kf_initialized   = True
-
-                kf.correct(measurement)
-
-                # Hard-reset when YOLO is very confident
-                if conf > 0.6:
-                    kf.statePre[:2]  = measurement
-                    kf.statePost[:2] = measurement
-
-                frame_ball_boxes[str(i)] = [x1, y1, x2, y2, conf]
-                have_det = True
-
-        ball_counts.append(1 if have_det else 0)
-
-        # Store the pre-correction Kalman prediction for this frame
-        if kf_initialized:
-            frame_kalman[str(i)] = [px, py]
-
-        if total_frames > 0:
-            progress.progress(min((i + 1) / total_frames, 1.0),
-                              text=f"Frame {i+1}/{total_frames} — {'ball detected' if have_det else 'no ball'}")
-
-    progress.empty()
-    return (clean_frames, frame_ball_boxes, frame_kalman,
-            ball_counts, frame_w, frame_h, fps, time.time() - start)
-
-
-def process_smart_crop_video(video_path, model):
-    """Run smartCroppingVideos logic and return cropped frames + per-frame overlay data."""
-    ball_cls = [k for k, v in model.names.items() if v == "sports ball"][0]
-
-    cap          = cv2.VideoCapture(video_path)
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps          = cap.get(cv2.CAP_PROP_FPS) or 30
-
-    ret, frame = cap.read()
-    if not ret:
-        cap.release()
-        return None
-
-    h, w      = frame.shape[:2]
-    target_w  = min(int(round(h * 9 / 16)), w)
-    max_x     = w - target_w
-    half_w    = target_w / 2.0
-    cx_min, cx_max = half_w, w - half_w
-    sx = _SC_OUT_W / target_w   # scale from crop-window coords → 540×960
-    sy = _SC_OUT_H / h
-
-    cropped_frames        = []
-    frame_ball_boxes_crop = {}   # {str(i): [x1,y1,x2,y2,conf]} in 540×960 space
-    frame_pred_crop       = {}   # {str(i): [px,py]}             in 540×960 space
-
-    crop_cx = None
-    tracker = _BallTracker()
-    fidx    = 0
-
-    progress = st.progress(0, text="Running smart crop...")
-    start    = time.time()
-
-    while True:
-        if frame is None:
-            break
-
-        ball_box = None
-        live_cx  = None
-
-        res = model.predict(source=frame, imgsz=_SC_IMGSZ, conf=_SC_CONF,
-                            iou=0.4, verbose=False, classes=[ball_cls])
-        r = res[0]
-        if r.boxes is not None and len(r.boxes) > 0:
-            xyxy  = r.boxes.xyxy.cpu().numpy()   # type: ignore
-            confs = r.boxes.conf.cpu().numpy()   # type: ignore
-            good  = [i for i in range(len(xyxy))
-                     if _sc_check_ball(xyxy[i][0], xyxy[i][1], xyxy[i][2], xyxy[i][3], h)]
-            if good:
-                bi              = good[int(np.argmax(confs[good]))]
-                bx1, by1, bx2, by2 = xyxy[bi]
-                dcx, dcy, dcnf  = (bx1+bx2)/2.0, (by1+by2)/2.0, float(confs[bi])
-                if not tracker.is_outlier(dcx, dcy, fidx):
-                    ball_box = (bx1, by1, bx2, by2, dcnf)
-                    tracker.update(fidx, dcx, dcy, dcnf)
-                    live_cx = dcx
-                else:
-                    tracker.tick_miss()
-            else:
-                tracker.tick_miss()
-        else:
-            tracker.tick_miss()
-
-        if live_cx is not None:
-            sm, mm     = _SC_SMOOTH_LIVE, _SC_MAX_MOVE_LIVE
-            target_cx  = float(np.clip(live_cx, cx_min, cx_max))
-        else:
-            sm, mm     = _SC_SMOOTH_HOLD, _SC_MAX_MOVE_HOLD
-            target_cx  = crop_cx if crop_cx is not None else w / 2.0
-
-        if crop_cx is None:
-            crop_cx = target_cx
-        else:
-            new_cx = sm * crop_cx + (1 - sm) * target_cx
-            delta  = new_cx - crop_cx
-            if abs(delta) > mm:
-                new_cx = crop_cx + np.sign(delta) * mm
-            crop_cx = new_cx
-
-        cx1 = max(0, min(int(round(crop_cx - half_w)), max_x)) if max_x > 0 else 0
-
-        cropped = frame[:, cx1:cx1 + target_w]
-        resized = cv2.resize(cropped, (_SC_OUT_W, _SC_OUT_H))
-        cropped_frames.append(cv2.cvtColor(resized, cv2.COLOR_BGR2RGB))
-
-        if ball_box is not None:
-            bx1, by1, bx2, by2, bc = ball_box
-            frame_ball_boxes_crop[str(fidx)] = [
-                float((bx1 - cx1) * sx), float(by1 * sy),
-                float((bx2 - cx1) * sx), float(by2 * sy),
-                bc,
-            ]
-
-        pred = tracker.predict(fidx)
-        if pred is not None:
-            pcx, pcy, pcnf = pred
-            if pcnf == -1.0 or pcnf > 0.05:
-                frame_pred_crop[str(fidx)] = [float((pcx - cx1) * sx), float(pcy * sy)]
-
-        if total_frames > 0:
-            progress.progress(min((fidx + 1) / total_frames, 1.0),
-                              text=f"Frame {fidx+1}/{total_frames}")
-
-        ret, frame = cap.read()
-        if not ret:
-            break
-        fidx += 1
-
-    cap.release()
-    progress.empty()
-    return (cropped_frames, frame_ball_boxes_crop, frame_pred_crop,
-            fps, time.time() - start)
-
-
-def render_video(frames, fps, label="Rendering video") -> str | None:
-    """Write RGB frames to a *persistent* temp file (H.264). Returns the file path."""
-    h, w = frames[0].shape[:2]
-
-    # delete=False so the file stays alive for the HTTP server to serve
-    out_tmp  = tempfile.NamedTemporaryFile(delete=False, suffix=".mp4")
-    out_path = out_tmp.name
-    out_tmp.close()
-    _rendered_paths.append(out_path)
-
-    fourcc = cv2.VideoWriter.fourcc(*"avc1")
-    writer = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
-    if not writer.isOpened():
-        st.error("H.264 (avc1) codec unavailable. Install ffmpeg and add it to PATH.")
-        os.unlink(out_path)
-        return None
-
-    progress = st.progress(0, text=label)
-    for i, frame_rgb in enumerate(frames):
-        writer.write(cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR))
-        progress.progress((i + 1) / len(frames),
-                          text=f"{label} — frame {i+1}/{len(frames)}")
-    writer.release()
-    progress.empty()
-    return out_path
-
-
-def build_player_html(video_url: str, frame_boxes: dict,
-                      frame_w: int, frame_h: int, fps: float) -> str:
-    boxes_json = json.dumps(frame_boxes)
-    return f"""
-<style>
-  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{ background: #000; }}
-
-  #player-wrap {{
-    position: relative;
-    width: 100%;
-    background: #000;
-  }}
-  #vid {{
-    width: 100%;
-    height: auto;    /* natural height — no letterboxing */
-    display: block;
-  }}
-  #overlay {{
-    position: absolute;
-    top: 0; left: 0;
-    pointer-events: none;
-  }}
-  #controls {{
-    height: 44px;
-    display: flex;
-    align-items: center;
-    padding: 4px 8px;
-    background: #111;
-  }}
-  #toggleBtn {{
-    padding: 5px 18px;
-    font-size: 13px;
-    font-weight: bold;
-    border: 2px solid #00cc44;
-    border-radius: 6px;
-    background: #00cc44;
-    color: #fff;
-    cursor: pointer;
-  }}
-  #toggleBtn.off {{
-    background: #333;
-    border-color: #555;
-    color: #aaa;
-  }}
-</style>
-
-<div id="controls">
-  <button id="toggleBtn" onclick="toggleBoxes()">Player Detection Boxes: ON</button>
-</div>
-<div id="player-wrap">
-  <video id="vid" controls>
-    <source src="{video_url}" type="video/mp4">
-  </video>
-  <canvas id="overlay"></canvas>
-</div>
-
-<script>
-  const BOXES  = {boxes_json};
-  const FPS    = {fps};
-  const VID_W  = {frame_w};
-  const VID_H  = {frame_h};
-  let showBoxes = true;
-
-  const vid    = document.getElementById('vid');
-  const canvas = document.getElementById('overlay');
-  const ctx    = canvas.getContext('2d');
-
-  function resizeCanvas() {{
-    // Match canvas exactly to the video's rendered pixel area (no letterbox offset)
-    canvas.width        = vid.clientWidth;
-    canvas.height       = vid.clientHeight;
-    canvas.style.width  = vid.clientWidth  + 'px';
-    canvas.style.height = vid.clientHeight + 'px';
-  }}
-
-  function drawFrame() {{
-    resizeCanvas();
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    if (showBoxes) {{
-      const frameIdx  = String(Math.floor(vid.currentTime * FPS));
-      const frameData = BOXES[frameIdx] || [];
-      const scaleX    = canvas.width  / VID_W;
-      const scaleY    = canvas.height / VID_H;
-
-      ctx.strokeStyle = '#00ff44';
-      ctx.lineWidth   = 2;
-      ctx.fillStyle   = '#00ff44';
-      ctx.font        = 'bold 13px sans-serif';
-
-      for (const [x1, y1, x2, y2, tid] of frameData) {{
-        const sx = x1 * scaleX, sy = y1 * scaleY;
-        const sw = (x2 - x1) * scaleX, sh = (y2 - y1) * scaleY;
-        ctx.strokeRect(sx, sy, sw, sh);
-        ctx.fillText('ID ' + tid, sx + 2, Math.max(sy - 4, 12));
-      }}
-    }}
-    requestAnimationFrame(drawFrame);
-  }}
-
-  function toggleBoxes() {{
-    showBoxes = !showBoxes;
-    const btn = document.getElementById('toggleBtn');
-    btn.textContent = 'Player Detection Boxes: ' + (showBoxes ? 'ON' : 'OFF');
-    btn.classList.toggle('off', !showBoxes);
-  }}
-
-  vid.addEventListener('loadedmetadata', () => {{ resizeCanvas(); drawFrame(); }});
-  window.addEventListener('resize', resizeCanvas);
-</script>
-"""
-
-
-def build_ball_html(video_url: str, frame_ball_boxes: dict, frame_kalman: dict,
-                    frame_w: int, frame_h: int, fps: float) -> str:
-    ball_json   = json.dumps(frame_ball_boxes)
-    kalman_json = json.dumps(frame_kalman)
-    return f"""
-<style>
-  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{ background: #000; }}
-
-  #player-wrap {{
-    position: relative;
-    width: 100%;
-    background: #000;
-  }}
-  #vid {{
-    width: 100%;
-    height: auto;
-    display: block;
-  }}
-  #overlay {{
-    position: absolute;
-    top: 0; left: 0;
-    pointer-events: none;
-  }}
-  #controls {{
-    height: 44px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 4px 8px;
-    background: #111;
-  }}
-  .toggleBtn {{
-    padding: 5px 18px;
-    font-size: 13px;
-    font-weight: bold;
-    border-radius: 6px;
-    cursor: pointer;
-  }}
-  #ballBoxBtn {{
-    border: 2px solid #ffff00;
-    background: #ffff00;
-    color: #fff;
-  }}
-  #ballBoxBtn.off {{
-    background: #333;
-    border-color: #555;
-    color: #aaa;
-  }}
-  #kalmanBtn {{
-    border: 2px solid #ff2222;
-    background: #ff2222;
-    color: #fff;
-  }}
-  #kalmanBtn.off {{
-    background: #333;
-    border-color: #555;
-    color: #aaa;
-  }}
-</style>
-
-<div id="controls">
-  <button id="ballBoxBtn" class="toggleBtn" onclick="toggleBallBox()">Ball Box: ON</button>
-  <button id="kalmanBtn"  class="toggleBtn" onclick="toggleKalman()">Kalman Prediction: ON</button>
-</div>
-<div id="player-wrap">
-  <video id="vid" controls>
-    <source src="{video_url}" type="video/mp4">
-  </video>
-  <canvas id="overlay"></canvas>
-</div>
-
-<script>
-  const BALL_BOXES = {ball_json};
-  const KALMAN     = {kalman_json};
-  const FPS   = {fps};
-  const VID_W = {frame_w};
-  const VID_H = {frame_h};
-  let showBallBox = true;
-  let showKalman  = true;
-
-  const vid    = document.getElementById('vid');
-  const canvas = document.getElementById('overlay');
-  const ctx    = canvas.getContext('2d');
-
-  function resizeCanvas() {{
-    canvas.width        = vid.clientWidth;
-    canvas.height       = vid.clientHeight;
-    canvas.style.width  = vid.clientWidth  + 'px';
-    canvas.style.height = vid.clientHeight + 'px';
-  }}
-
-  function drawFrame() {{
-    resizeCanvas();
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    const frameIdx = String(Math.floor(vid.currentTime * FPS));
-    const scaleX   = canvas.width  / VID_W;
-    const scaleY   = canvas.height / VID_H;
-
-    if (showBallBox && BALL_BOXES[frameIdx]) {{
-      const [x1, y1, x2, y2, conf] = BALL_BOXES[frameIdx];
-      ctx.strokeStyle = '#ffff00';
-      ctx.lineWidth   = 3;
-      ctx.strokeRect(x1*scaleX, y1*scaleY, (x2-x1)*scaleX, (y2-y1)*scaleY);
-      ctx.fillStyle = '#ffff00';
-      ctx.font      = 'bold 13px sans-serif';
-      ctx.fillText(Math.round(conf*100) + '%', x1*scaleX + 2, y1*scaleY - 4);
-    }}
-
-    if (showKalman && KALMAN[frameIdx]) {{
-      const [px, py] = KALMAN[frameIdx];
-      ctx.strokeStyle = '#ff2222';
-      ctx.lineWidth   = 2;
-      ctx.beginPath();
-      ctx.arc(px*scaleX, py*scaleY, 12, 0, 2*Math.PI);
-      ctx.stroke();
-    }}
-
-    requestAnimationFrame(drawFrame);
-  }}
-
-  function toggleBallBox() {{
-    showBallBox = !showBallBox;
-    const btn = document.getElementById('ballBoxBtn');
-    btn.textContent = 'Ball Box: ' + (showBallBox ? 'ON' : 'OFF');
-    btn.classList.toggle('off', !showBallBox);
-  }}
-
-  function toggleKalman() {{
-    showKalman = !showKalman;
-    const btn = document.getElementById('kalmanBtn');
-    btn.textContent = 'Kalman Prediction: ' + (showKalman ? 'ON' : 'OFF');
-    btn.classList.toggle('off', !showKalman);
-  }}
-
-  vid.addEventListener('loadedmetadata', () => {{ resizeCanvas(); drawFrame(); }});
-  window.addEventListener('resize', resizeCanvas);
-</script>
-"""
-
-
-def build_smart_crop_html(video_url: str, frame_ball_boxes: dict,
-                          frame_pred: dict, fps: float) -> str:
-    ball_json = json.dumps(frame_ball_boxes)
-    pred_json = json.dumps(frame_pred)
-    return f"""
-<style>
-  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-  body {{ background: #000; display: flex; flex-direction: column; align-items: center; }}
-
-  #controls {{
-    width: 100%;
-    max-width: 420px;
-    height: 44px;
-    display: flex;
-    align-items: center;
-    gap: 8px;
-    padding: 4px 8px;
-    background: #111;
-  }}
-  .toggleBtn {{
-    padding: 5px 14px;
-    font-size: 13px;
-    font-weight: bold;
-    border-radius: 6px;
-    cursor: pointer;
-  }}
-  #ballBoxBtn {{
-    border: 2px solid #ffff00;
-    background: #ffff00;
-    color: #000;
-  }}
-  #ballBoxBtn.off {{
-    background: #333;
-    border-color: #555;
-    color: #aaa;
-  }}
-  #predBtn {{
-    border: 2px solid #ff6400;
-    background: #ff6400;
-    color: #fff;
-  }}
-  #predBtn.off {{
-    background: #333;
-    border-color: #555;
-    color: #aaa;
-  }}
-  #player-wrap {{
-    position: relative;
-    width: 100%;
-    max-width: 420px;
-    background: #000;
-  }}
-  #vid {{
-    width: 100%;
-    height: auto;
-    display: block;
-  }}
-  #overlay {{
-    position: absolute;
-    top: 0; left: 0;
-    pointer-events: none;
-  }}
-</style>
-
-<div id="controls">
-  <button id="ballBoxBtn" class="toggleBtn" onclick="toggleBallBox()">Ball Box: ON</button>
-  <button id="predBtn"    class="toggleBtn" onclick="togglePred()">Tracker Prediction: ON</button>
-</div>
-<div id="player-wrap">
-  <video id="vid" controls>
-    <source src="{video_url}" type="video/mp4">
-  </video>
-  <canvas id="overlay"></canvas>
-</div>
-
-<script>
-  const BALL_BOXES = {ball_json};
-  const PRED       = {pred_json};
-  const FPS        = {fps};
-  let showBallBox = true;
-  let showPred    = true;
-
-  const vid    = document.getElementById('vid');
-  const canvas = document.getElementById('overlay');
-  const ctx    = canvas.getContext('2d');
-
-  function resizeCanvas() {{
-    canvas.width        = vid.clientWidth;
-    canvas.height       = vid.clientHeight;
-    canvas.style.width  = vid.clientWidth  + 'px';
-    canvas.style.height = vid.clientHeight + 'px';
-  }}
-
-  function drawFrame() {{
-    resizeCanvas();
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-
-    const frameIdx = String(Math.floor(vid.currentTime * FPS));
-    // video is 540×960; scale canvas coords accordingly
-    const scaleX   = canvas.width  / 540;
-    const scaleY   = canvas.height / 960;
-
-    if (showBallBox && BALL_BOXES[frameIdx]) {{
-      const [x1, y1, x2, y2, conf] = BALL_BOXES[frameIdx];
-      ctx.strokeStyle = '#ffff00';
-      ctx.lineWidth   = 3;
-      ctx.strokeRect(x1*scaleX, y1*scaleY, (x2-x1)*scaleX, (y2-y1)*scaleY);
-      ctx.fillStyle = '#ffff00';
-      ctx.font      = 'bold 13px sans-serif';
-      ctx.fillText(Math.round(conf*100) + '%', x1*scaleX + 2, Math.max(14, y1*scaleY - 4));
-    }}
-
-    if (showPred && PRED[frameIdx]) {{
-      const [px, py] = PRED[frameIdx];
-      ctx.strokeStyle = '#ff6400';
-      ctx.lineWidth   = 2;
-      ctx.beginPath();
-      ctx.arc(px*scaleX, py*scaleY, 14, 0, 2*Math.PI);
-      ctx.stroke();
-    }}
-
-    requestAnimationFrame(drawFrame);
-  }}
-
-  function toggleBallBox() {{
-    showBallBox = !showBallBox;
-    const btn = document.getElementById('ballBoxBtn');
-    btn.textContent = 'Ball Box: ' + (showBallBox ? 'ON' : 'OFF');
-    btn.classList.toggle('off', !showBallBox);
-  }}
-
-  function togglePred() {{
-    showPred = !showPred;
-    const btn = document.getElementById('predBtn');
-    btn.textContent = 'Tracker Prediction: ' + (showPred ? 'ON' : 'OFF');
-    btn.classList.toggle('off', !showPred);
-  }}
-
-  vid.addEventListener('loadedmetadata', () => {{ resizeCanvas(); drawFrame(); }});
-  window.addEventListener('resize', resizeCanvas);
-</script>
-"""
-
-
-# ─── UI ──────────────────────────────────────────────────────────────────────
+# ─── Sidebar ─────────────────────────────────────────────────────────────────
 
 with st.sidebar:
     st.header("Menu")
@@ -860,16 +40,17 @@ with st.sidebar:
         time.sleep(0.3)
         os._exit(0)
 
+
+# ─── Upload ───────────────────────────────────────────────────────────────────
+
 uploaded_file = st.file_uploader("Upload a video", type=["mp4", "avi", "mov"])
 
 if uploaded_file:
-    # Keep the tmp file alive across reruns so both detection buttons can use it
+    # Keep the tmp file alive across reruns so all three buttons can use it
     if st.session_state.get("uploaded_name") != uploaded_file.name:
-        # Clean up previous upload temp
         old_tmp = st.session_state.get("tmp_path")
         if old_tmp and os.path.exists(old_tmp):
             os.unlink(old_tmp)
-        # Clean up any previously rendered output files
         for key in ("video_path", "ball_video_path", "smart_crop_video_path"):
             old_rendered = st.session_state.pop(key, None)
             if old_rendered and os.path.exists(old_rendered):
@@ -885,6 +66,7 @@ if uploaded_file:
     tmp_path = st.session_state.tmp_path
 
     col1, col2, col3 = st.columns(3)
+
     with col1:
         if st.button("Run Player Detection", type="primary", use_container_width=True):
             (clean_frames, annotated_frames, counts,
@@ -898,7 +80,6 @@ if uploaded_file:
             st.session_state.frame_h          = frame_h
             st.session_state.fps              = fps
             st.session_state.elapsed          = elapsed
-            # Invalidate cached render so the new detection results are used
             st.session_state.pop("video_path", None)
             st.session_state.pop("video_url", None)
 
@@ -915,7 +96,6 @@ if uploaded_file:
             st.session_state.ball_frame_h       = ball_frame_h
             st.session_state.ball_fps           = ball_fps
             st.session_state.ball_elapsed       = ball_elapsed
-            # Invalidate cached render so the new detection results are used
             st.session_state.pop("ball_video_path", None)
             st.session_state.pop("ball_video_url", None)
 
@@ -931,9 +111,9 @@ if uploaded_file:
                 st.session_state.sc_pred       = sc_pred
                 st.session_state.sc_fps        = sc_fps
                 st.session_state.sc_elapsed    = sc_elapsed
-                # Invalidate cached render so the new results are used
                 st.session_state.pop("smart_crop_video_path", None)
                 st.session_state.pop("smart_crop_video_url", None)
+
 
 # ─── Results ──────────────────────────────────────────────────────────────────
 
@@ -987,8 +167,8 @@ if has_player or has_ball or has_smart_crop:
         st.subheader("Smart Crop")
         st.success(f"Processed {len(sc_frames)} frames in {sc_elapsed:.1f}s ({sc_elapsed/60:.1f} min)")
         col1, col2 = st.columns(2)
-        col1.metric("Total frames",  len(sc_frames))
-        col2.metric("Output size",   f"{_SC_OUT_W}×{_SC_OUT_H}")
+        col1.metric("Total frames", len(sc_frames))
+        col2.metric("Output size",  f"{cropped_width}×{cropped_height}")
 
     st.divider()
 
@@ -1001,38 +181,34 @@ if has_player or has_ball or has_smart_crop:
     if has_smart_crop:
         tab_names += ["Smart Crop Video"]
 
-    tabs     = st.tabs(tab_names)
-    tab_idx  = 0
+    tabs    = st.tabs(tab_names)
+    tab_idx = 0
 
     if has_player:
         with tabs[tab_idx]:   # Frame Scrubber
             frame_idx = st.slider("Scrub through frames", 0, len(annotated_frames) - 1, 0)
 
-            # Overlay toggles
             chk_cols = st.columns(3 if has_ball else 1)
             show_player_boxes = chk_cols[0].checkbox("Player Boxes", value=True)
             if has_ball:
                 show_ball_box = chk_cols[1].checkbox("Ball Box", value=True)
                 show_kalman   = chk_cols[2].checkbox("Kalman Prediction", value=True)
 
-            # Start from clean or annotated base depending on player toggle
             display_frame = (annotated_frames[frame_idx] if show_player_boxes
                              else clean_frames[frame_idx]).copy()
 
-            # Draw ball box (orange) if ball detection ran and toggle is on
             if has_ball and show_ball_box and str(frame_idx) in frame_ball_boxes:
                 x1, y1, x2, y2, conf = frame_ball_boxes[str(frame_idx)]
                 cv2.rectangle(display_frame,
                               (int(x1), int(y1)), (int(x2), int(y2)),
-                              (255, 255, 0), 3)   # yellow in RGB
+                              (255, 255, 0), 3)
                 cv2.putText(display_frame, f"{conf:.0%}",
                             (int(x1), max(0, int(y1) - 6)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 2)
 
-            # Draw Kalman circle (red) if ball detection ran and toggle is on
             if has_ball and show_kalman and str(frame_idx) in frame_kalman:
                 px, py = frame_kalman[str(frame_idx)]
-                cv2.circle(display_frame, (int(px), int(py)), 12, (255, 34, 34), 2)  # red in RGB
+                cv2.circle(display_frame, (int(px), int(py)), 12, (255, 34, 34), 2)
 
             ball_status = ""
             if has_ball:
@@ -1114,8 +290,4 @@ if has_player or has_ball or has_smart_crop:
                     st.session_state.smart_crop_video_url,
                     sc_ball_boxes, sc_pred, sc_fps
                 )
-                # Vertical video (9:16): fix a comfortable display height
                 components.html(html, height=850, scrolling=False)
-
-else:
-    st.info("Upload a video to get started.")
