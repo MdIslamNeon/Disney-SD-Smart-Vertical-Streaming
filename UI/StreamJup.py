@@ -85,12 +85,12 @@ if uploaded_file:
 
     with col2:
         if st.button("Run Ball Detection", type="primary", use_container_width=True):
-            (ball_clean_frames, frame_ball_boxes, frame_kalman,
+            (ball_clean_frames, frame_ball_boxes, frame_gaussian,
              ball_counts, ball_frame_w, ball_frame_h, ball_fps, ball_elapsed) = process_ball_video(tmp_path, load_model())
 
             st.session_state.ball_clean_frames  = ball_clean_frames
             st.session_state.frame_ball_boxes   = frame_ball_boxes
-            st.session_state.frame_kalman       = frame_kalman
+            st.session_state.frame_gaussian     = frame_gaussian
             st.session_state.ball_counts        = ball_counts
             st.session_state.ball_frame_w       = ball_frame_w
             st.session_state.ball_frame_h       = ball_frame_h
@@ -141,7 +141,7 @@ if has_player or has_ball or has_smart_crop:
 
     if has_ball:
         frame_ball_boxes  = st.session_state.frame_ball_boxes
-        frame_kalman      = st.session_state.frame_kalman
+        frame_gaussian    = st.session_state.frame_gaussian
         ball_counts       = st.session_state.ball_counts
         ball_frame_w      = st.session_state.ball_frame_w
         ball_frame_h      = st.session_state.ball_frame_h
@@ -192,7 +192,7 @@ if has_player or has_ball or has_smart_crop:
             show_player_boxes = chk_cols[0].checkbox("Player Boxes", value=True)
             if has_ball:
                 show_ball_box = chk_cols[1].checkbox("Ball Box", value=True)
-                show_kalman   = chk_cols[2].checkbox("Kalman Prediction", value=True)
+                show_gaussian = chk_cols[2].checkbox("Gaussian Smoothing", value=True)
 
             display_frame = (annotated_frames[frame_idx] if show_player_boxes
                              else clean_frames[frame_idx]).copy()
@@ -206,8 +206,8 @@ if has_player or has_ball or has_smart_crop:
                             (int(x1), max(0, int(y1) - 6)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 2)
 
-            if has_ball and show_kalman and str(frame_idx) in frame_kalman:
-                px, py = frame_kalman[str(frame_idx)]
+            if has_ball and show_gaussian and str(frame_idx) in frame_gaussian:
+                px, py = frame_gaussian[str(frame_idx)]
                 cv2.circle(display_frame, (int(px), int(py)), 12, (255, 34, 34), 2)
 
             ball_status = ""
@@ -258,7 +258,7 @@ if has_player or has_ball or has_smart_crop:
             if "ball_video_url" in st.session_state:
                 html = build_ball_html(
                     st.session_state.ball_video_url,
-                    frame_ball_boxes, frame_kalman,
+                    frame_ball_boxes, frame_gaussian,
                     ball_frame_w, ball_frame_h, ball_fps
                 )
                 video_display_h = int(1400 * ball_frame_h / ball_frame_w)

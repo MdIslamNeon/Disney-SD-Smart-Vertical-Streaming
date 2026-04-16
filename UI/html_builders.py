@@ -114,10 +114,10 @@ def build_player_html(video_url: str, frame_boxes: dict,
 """
 
 
-def build_ball_html(video_url: str, frame_ball_boxes: dict, frame_kalman: dict,
+def build_ball_html(video_url: str, frame_ball_boxes: dict, frame_gaussian: dict,
                     frame_w: int, frame_h: int, fps: float) -> str:
-    ball_json   = json.dumps(frame_ball_boxes)
-    kalman_json = json.dumps(frame_kalman)
+    ball_json     = json.dumps(frame_ball_boxes)
+    gaussian_json = json.dumps(frame_gaussian)
     return f"""
 <style>
   * {{ box-sizing: border-box; margin: 0; padding: 0; }}
@@ -163,12 +163,12 @@ def build_ball_html(video_url: str, frame_ball_boxes: dict, frame_kalman: dict,
     border-color: #555;
     color: #aaa;
   }}
-  #kalmanBtn {{
+  #gaussianBtn {{
     border: 2px solid #ff2222;
     background: #ff2222;
     color: #fff;
   }}
-  #kalmanBtn.off {{
+  #gaussianBtn.off {{
     background: #333;
     border-color: #555;
     color: #aaa;
@@ -176,8 +176,8 @@ def build_ball_html(video_url: str, frame_ball_boxes: dict, frame_kalman: dict,
 </style>
 
 <div id="controls">
-  <button id="ballBoxBtn" class="toggleBtn" onclick="toggleBallBox()">Ball Box: ON</button>
-  <button id="kalmanBtn"  class="toggleBtn" onclick="toggleKalman()">Kalman Prediction: ON</button>
+  <button id="ballBoxBtn"  class="toggleBtn" onclick="toggleBallBox()">Ball Box: ON</button>
+  <button id="gaussianBtn" class="toggleBtn" onclick="toggleGaussian()">Gaussian Smoothing: ON</button>
 </div>
 <div id="player-wrap">
   <video id="vid" controls>
@@ -188,12 +188,12 @@ def build_ball_html(video_url: str, frame_ball_boxes: dict, frame_kalman: dict,
 
 <script>
   const BALL_BOXES = {ball_json};
-  const KALMAN     = {kalman_json};
+  const GAUSSIAN   = {gaussian_json};
   const FPS   = {fps};
   const VID_W = {frame_w};
   const VID_H = {frame_h};
-  let showBallBox = true;
-  let showKalman  = true;
+  let showBallBox  = true;
+  let showGaussian = true;
 
   const vid    = document.getElementById('vid');
   const canvas = document.getElementById('overlay');
@@ -224,8 +224,8 @@ def build_ball_html(video_url: str, frame_ball_boxes: dict, frame_kalman: dict,
       ctx.fillText(Math.round(conf*100) + '%', x1*scaleX + 2, y1*scaleY - 4);
     }}
 
-    if (showKalman && KALMAN[frameIdx]) {{
-      const [px, py] = KALMAN[frameIdx];
+    if (showGaussian && GAUSSIAN[frameIdx]) {{
+      const [px, py] = GAUSSIAN[frameIdx];
       ctx.strokeStyle = '#ff2222';
       ctx.lineWidth   = 2;
       ctx.beginPath();
@@ -243,11 +243,11 @@ def build_ball_html(video_url: str, frame_ball_boxes: dict, frame_kalman: dict,
     btn.classList.toggle('off', !showBallBox);
   }}
 
-  function toggleKalman() {{
-    showKalman = !showKalman;
-    const btn = document.getElementById('kalmanBtn');
-    btn.textContent = 'Kalman Prediction: ' + (showKalman ? 'ON' : 'OFF');
-    btn.classList.toggle('off', !showKalman);
+  function toggleGaussian() {{
+    showGaussian = !showGaussian;
+    const btn = document.getElementById('gaussianBtn');
+    btn.textContent = 'Gaussian Smoothing: ' + (showGaussian ? 'ON' : 'OFF');
+    btn.classList.toggle('off', !showGaussian);
   }}
 
   vid.addEventListener('loadedmetadata', () => {{ resizeCanvas(); drawFrame(); }});
