@@ -6,6 +6,9 @@ Ball Framing integration can run on its own and is tested.
 Currently player detection, ball detection, and smart cropping are in the UI
 The issue is that the logic was copy and pasted and not imported. Leading to 1000+ lines
 
+Note: the player detection logic in the UI uses yolo to detect. The player_tracking_test.py file
+uses ByteTracker to maintain constant detection IDs, so this needs to be changed to use that
+
 
 TODO
 1. Refactor the code
