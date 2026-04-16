@@ -6,13 +6,6 @@ from ultralytics import YOLO
 from collections import deque
 
 BASE_DIR = Path(__file__).resolve().parent
-local_videos = BASE_DIR / "local_videos"
-
-output_folder = BASE_DIR / "output_videos_vertical_smart_ball"
-output_folder.mkdir(exist_ok=True)
-
-debug_folder = BASE_DIR / "debug_videos_detections"
-debug_folder.mkdir(exist_ok=True)
 
 cropped_width, cropped_height = 540, 960
 
@@ -125,148 +118,156 @@ def check_ball(x1, y1, x2, y2, fh):
     return True
 
 
-# Use an absolute path so the model loads correctly regardless of working directory on Windows
-model = YOLO(str(BASE_DIR.parent / "models" / "yolov8m.pt"))
-ball_cls = [k for k, v in model.names.items() if v == "sports ball"][0]
+if __name__ == "__main__":
+    local_videos = BASE_DIR / "local_videos"
 
-video_files = [f for f in local_videos.iterdir() if f.is_file() and f.suffix.lower() == ".mp4"]
-if not video_files:
-    raise FileNotFoundError(f"no videos in {local_videos}")
+    output_folder = BASE_DIR / "output_videos_vertical_smart_ball"
+    output_folder.mkdir(exist_ok=True)
 
-for video_path in tqdm(video_files, desc="processing", unit="video"):
-    cap = cv2.VideoCapture(str(video_path))
-    if not cap.isOpened():
-        continue
+    debug_folder = BASE_DIR / "debug_videos_detections"
+    debug_folder.mkdir(exist_ok=True)
 
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30
-    ret, frame = cap.read()
-    if not ret or frame is None:
-        cap.release()
-        continue
+    model = YOLO(str(BASE_DIR.parent / "models" / "yolov8m.pt"))
+    ball_cls = [k for k, v in model.names.items() if v == "sports ball"][0]
 
-    h, w = frame.shape[:2]
-    target_w = min(int(round(h * 9 / 16)), w)
-    max_x = w - target_w
-    half_w = target_w / 2.0
-    cx_min, cx_max = half_w, w - half_w
+    video_files = [f for f in local_videos.iterdir() if f.is_file() and f.suffix.lower() == ".mp4"]
+    if not video_files:
+        raise FileNotFoundError(f"no videos in {local_videos}")
 
-    out_path = output_folder / f"{video_path.stem}_smartcrop_v5.mp4"
-    dbg_path = debug_folder / f"{video_path.stem}_debug_v5.mp4"
-    fourcc = cv2.VideoWriter.fourcc(*"mp4v")
-    writer = cv2.VideoWriter(str(out_path), fourcc, fps, (cropped_width, cropped_height))
-    dbg_writer = cv2.VideoWriter(str(dbg_path), fourcc, fps, (w, h))
+    for video_path in tqdm(video_files, desc="processing", unit="video"):
+        cap = cv2.VideoCapture(str(video_path))
+        if not cap.isOpened():
+            continue
 
-    crop_cx = None
-    fidx = 0
-    tracker = BallTracker()
+        fps = cap.get(cv2.CAP_PROP_FPS) or 30
+        ret, frame = cap.read()
+        if not ret or frame is None:
+            cap.release()
+            continue
 
-    while True:
-        if frame is None:
-            break
+        h, w = frame.shape[:2]
+        target_w = min(int(round(h * 9 / 16)), w)
+        max_x = w - target_w
+        half_w = target_w / 2.0
+        cx_min, cx_max = half_w, w - half_w
 
-        ball_box = None
-        rejected = []
-        status = "holding"
-        live_cx = None
+        out_path = output_folder / f"{video_path.stem}_smartcrop_v5.mp4"
+        dbg_path = debug_folder / f"{video_path.stem}_debug_v5.mp4"
+        fourcc = cv2.VideoWriter.fourcc(*"mp4v")
+        writer = cv2.VideoWriter(str(out_path), fourcc, fps, (cropped_width, cropped_height))
+        dbg_writer = cv2.VideoWriter(str(dbg_path), fourcc, fps, (w, h))
 
-        if fidx % DETECT_EVERY_N == 0:
-            res = model.predict(source=frame, imgsz=IMGSZ, conf=CONF,
-                                iou=0.4, verbose=False, classes=[ball_cls])
-            r = res[0]
-            if r.boxes is not None and len(r.boxes) > 0:
-                xyxy = r.boxes.xyxy.cpu().numpy() # type: ignore
-                confs = r.boxes.conf.cpu().numpy() # type: ignore
+        crop_cx = None
+        fidx = 0
+        tracker = BallTracker()
 
-                good = [i for i in range(len(xyxy)) if check_ball(xyxy[i][0], xyxy[i][1], xyxy[i][2], xyxy[i][3], h)]
-                bad = [i for i in range(len(xyxy)) if i not in good]
-                for i in bad:
-                    rejected.append(tuple(xyxy[i]))
+        while True:
+            if frame is None:
+                break
 
-                if good:
-                    bi = good[int(np.argmax(confs[good]))]
-                    x1, y1, x2, y2 = xyxy[bi]
-                    dcx = (x1 + x2) / 2.0
-                    dcy = (y1 + y2) / 2.0
-                    dcnf = float(confs[bi])
+            ball_box = None
+            rejected = []
+            status = "holding"
+            live_cx = None
 
-                    if tracker.is_outlier(dcx, dcy, fidx):
-                        rejected.append((x1, y1, x2, y2))
-                        tracker.tick_miss()
-                        status = "outlier"
+            if fidx % DETECT_EVERY_N == 0:
+                res = model.predict(source=frame, imgsz=IMGSZ, conf=CONF,
+                                    iou=0.4, verbose=False, classes=[ball_cls])
+                r = res[0]
+                if r.boxes is not None and len(r.boxes) > 0:
+                    xyxy = r.boxes.xyxy.cpu().numpy() # type: ignore
+                    confs = r.boxes.conf.cpu().numpy() # type: ignore
+
+                    good = [i for i in range(len(xyxy)) if check_ball(xyxy[i][0], xyxy[i][1], xyxy[i][2], xyxy[i][3], h)]
+                    bad = [i for i in range(len(xyxy)) if i not in good]
+                    for i in bad:
+                        rejected.append(tuple(xyxy[i]))
+
+                    if good:
+                        bi = good[int(np.argmax(confs[good]))]
+                        x1, y1, x2, y2 = xyxy[bi]
+                        dcx = (x1 + x2) / 2.0
+                        dcy = (y1 + y2) / 2.0
+                        dcnf = float(confs[bi])
+
+                        if tracker.is_outlier(dcx, dcy, fidx):
+                            rejected.append((x1, y1, x2, y2))
+                            tracker.tick_miss()
+                            status = "outlier"
+                        else:
+                            ball_box = (x1, y1, x2, y2, dcnf)
+                            tracker.update(fidx, dcx, dcy, dcnf)
+                            live_cx = dcx
+                            status = f"ball {dcnf:.2f}"
                     else:
-                        ball_box = (x1, y1, x2, y2, dcnf)
-                        tracker.update(fidx, dcx, dcy, dcnf)
-                        live_cx = dcx
-                        status = f"ball {dcnf:.2f}"
+                        tracker.tick_miss()
                 else:
                     tracker.tick_miss()
+
+            if live_cx is not None:
+                sm = SMOOTHING_LIVE
+                mm = MAX_MOVE_LIVE
+                target_cx = float(np.clip(live_cx, cx_min, cx_max))
             else:
-                tracker.tick_miss()
+                sm = SMOOTHING_HOLD
+                mm = MAX_MOVE_HOLD
+                target_cx = crop_cx if crop_cx is not None else w / 2.0
 
-        if live_cx is not None:
-            sm = SMOOTHING_LIVE
-            mm = MAX_MOVE_LIVE
-            target_cx = float(np.clip(live_cx, cx_min, cx_max))
-        else:
-            sm = SMOOTHING_HOLD
-            mm = MAX_MOVE_HOLD
-            target_cx = crop_cx if crop_cx is not None else w / 2.0
+            if crop_cx is None:
+                crop_cx = target_cx
+            else:
+                new_cx = sm * crop_cx + (1 - sm) * target_cx
+                delta = new_cx - crop_cx
+                if abs(delta) > mm:
+                    new_cx = crop_cx + np.sign(delta) * mm
+                crop_cx = new_cx
 
-        if crop_cx is None:
-            crop_cx = target_cx
-        else:
-            new_cx = sm * crop_cx + (1 - sm) * target_cx
-            delta = new_cx - crop_cx
-            if abs(delta) > mm:
-                new_cx = crop_cx + np.sign(delta) * mm
-            crop_cx = new_cx
+            x1 = max(0, min(int(round(crop_cx - half_w)), max_x)) if max_x > 0 else 0
+            x2 = x1 + target_w
 
-        x1 = max(0, min(int(round(crop_cx - half_w)), max_x)) if max_x > 0 else 0
-        x2 = x1 + target_w
+            writer.write(cv2.resize(frame[:, x1:x2], (cropped_width, cropped_height)))
 
-        writer.write(cv2.resize(frame[:, x1:x2], (cropped_width, cropped_height)))
+            dbg = frame.copy()
+            cv2.rectangle(dbg, (x1, 0), (x2, h - 1), (0, 255, 255), 3)
 
-        dbg = frame.copy()
-        cv2.rectangle(dbg, (x1, 0), (x2, h - 1), (0, 255, 255), 3)
+            for rb in rejected:
+                cv2.rectangle(dbg, (int(rb[0]), int(rb[1])), (int(rb[2]), int(rb[3])), (0, 80, 255), 2)
+                cv2.putText(dbg, "x", (int(rb[0]), max(20, int(rb[1]) - 6)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 80, 255), 2)
 
-        for rb in rejected:
-            cv2.rectangle(dbg, (int(rb[0]), int(rb[1])), (int(rb[2]), int(rb[3])), (0, 80, 255), 2)
-            cv2.putText(dbg, "x", (int(rb[0]), max(20, int(rb[1]) - 6)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 80, 255), 2)
+            if ball_box is not None:
+                bx1, by1, bx2, by2, bc = ball_box
+                cv2.rectangle(dbg, (int(bx1), int(by1)), (int(bx2), int(by2)), (0, 255, 0), 4)
+                cv2.putText(dbg, f"{bc:.2f}", (int(bx1), max(40, int(by1) - 12)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 255, 0), 3)
 
-        if ball_box is not None:
-            bx1, by1, bx2, by2, bc = ball_box
-            cv2.rectangle(dbg, (int(bx1), int(by1)), (int(bx2), int(by2)), (0, 255, 0), 4)
-            cv2.putText(dbg, f"{bc:.2f}", (int(bx1), max(40, int(by1) - 12)),
-                        cv2.FONT_HERSHEY_SIMPLEX, 1.1, (0, 255, 0), 3)
+            pred = tracker.predict(fidx)
+            if pred is not None:
+                pcx, pcy, pcnf = pred
+                if pcnf == -1.0 or pcnf > 0.05:
+                    col = (255, 100, 0) if pcnf != -1.0 else (150, 100, 100)
+                    cv2.circle(dbg, (int(pcx), int(pcy)), 18, col, 3)
 
-        pred = tracker.predict(fidx)
-        if pred is not None:
-            pcx, pcy, pcnf = pred
-            if pcnf == -1.0 or pcnf > 0.05:
-                col = (255, 100, 0) if pcnf != -1.0 else (150, 100, 100)
-                cv2.circle(dbg, (int(pcx), int(pcy)), 18, col, 3)
+            arc, prev_pt = tracker.arc_points(fidx, 15), None
+            for tx, ty in arc:
+                pt = (int(np.clip(tx, 0, w - 1)), int(np.clip(ty, 0, h - 1)))
+                if prev_pt:
+                    cv2.line(dbg, prev_pt, pt, (255, 80, 0), 2)
+                cv2.circle(dbg, pt, 4, (255, 80, 0), -1)
+                prev_pt = pt
 
-        arc, prev_pt = tracker.arc_points(fidx, 15), None
-        for tx, ty in arc:
-            pt = (int(np.clip(tx, 0, w - 1)), int(np.clip(ty, 0, h - 1)))
-            if prev_pt:
-                cv2.line(dbg, prev_pt, pt, (255, 80, 0), 2)
-            cv2.circle(dbg, pt, 4, (255, 80, 0), -1)
-            prev_pt = pt
+            scol = (0, 255, 0) if "ball" in status else (180, 180, 0)
+            cv2.putText(dbg, status, (20, 55), cv2.FONT_HERSHEY_SIMPLEX, 1.3, scol, 3)
+            cv2.putText(dbg, f"f={fidx}", (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (200, 200, 200), 2)
 
-        scol = (0, 255, 0) if "ball" in status else (180, 180, 0)
-        cv2.putText(dbg, status, (20, 55), cv2.FONT_HERSHEY_SIMPLEX, 1.3, scol, 3)
-        cv2.putText(dbg, f"f={fidx}", (20, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.9, (200, 200, 200), 2)
+            dbg_writer.write(dbg)
 
-        dbg_writer.write(dbg)
+            ret, frame = cap.read()
+            if not ret:
+                break
+            fidx += 1
 
-        ret, frame = cap.read()
-        if not ret:
-            break
-        fidx += 1
-
-    cap.release()
-    writer.release()
-    dbg_writer.release()
-    print(f"done: {out_path.name}")
+        cap.release()
+        writer.release()
+        dbg_writer.release()
+        print(f"done: {out_path.name}")

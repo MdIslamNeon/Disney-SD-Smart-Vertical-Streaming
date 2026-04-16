@@ -1,0 +1,399 @@
+import json
+
+
+def build_player_html(video_url: str, frame_boxes: dict,
+                      frame_w: int, frame_h: int, fps: float) -> str:
+    boxes_json = json.dumps(frame_boxes)
+    return f"""
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ background: #000; }}
+
+  #player-wrap {{
+    position: relative;
+    width: 100%;
+    background: #000;
+  }}
+  #vid {{
+    width: 100%;
+    height: auto;
+    display: block;
+  }}
+  #overlay {{
+    position: absolute;
+    top: 0; left: 0;
+    pointer-events: none;
+  }}
+  #controls {{
+    height: 44px;
+    display: flex;
+    align-items: center;
+    padding: 4px 8px;
+    background: #111;
+  }}
+  #toggleBtn {{
+    padding: 5px 18px;
+    font-size: 13px;
+    font-weight: bold;
+    border: 2px solid #00cc44;
+    border-radius: 6px;
+    background: #00cc44;
+    color: #fff;
+    cursor: pointer;
+  }}
+  #toggleBtn.off {{
+    background: #333;
+    border-color: #555;
+    color: #aaa;
+  }}
+</style>
+
+<div id="controls">
+  <button id="toggleBtn" onclick="toggleBoxes()">Player Detection Boxes: ON</button>
+</div>
+<div id="player-wrap">
+  <video id="vid" controls>
+    <source src="{video_url}" type="video/mp4">
+  </video>
+  <canvas id="overlay"></canvas>
+</div>
+
+<script>
+  const BOXES  = {boxes_json};
+  const FPS    = {fps};
+  const VID_W  = {frame_w};
+  const VID_H  = {frame_h};
+  let showBoxes = true;
+
+  const vid    = document.getElementById('vid');
+  const canvas = document.getElementById('overlay');
+  const ctx    = canvas.getContext('2d');
+
+  function resizeCanvas() {{
+    canvas.width        = vid.clientWidth;
+    canvas.height       = vid.clientHeight;
+    canvas.style.width  = vid.clientWidth  + 'px';
+    canvas.style.height = vid.clientHeight + 'px';
+  }}
+
+  function drawFrame() {{
+    resizeCanvas();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    if (showBoxes) {{
+      const frameIdx  = String(Math.floor(vid.currentTime * FPS));
+      const frameData = BOXES[frameIdx] || [];
+      const scaleX    = canvas.width  / VID_W;
+      const scaleY    = canvas.height / VID_H;
+
+      ctx.strokeStyle = '#00ff44';
+      ctx.lineWidth   = 2;
+      ctx.fillStyle   = '#00ff44';
+      ctx.font        = 'bold 13px sans-serif';
+
+      for (const [x1, y1, x2, y2, tid] of frameData) {{
+        const sx = x1 * scaleX, sy = y1 * scaleY;
+        const sw = (x2 - x1) * scaleX, sh = (y2 - y1) * scaleY;
+        ctx.strokeRect(sx, sy, sw, sh);
+        ctx.fillText('ID ' + tid, sx + 2, Math.max(sy - 4, 12));
+      }}
+    }}
+    requestAnimationFrame(drawFrame);
+  }}
+
+  function toggleBoxes() {{
+    showBoxes = !showBoxes;
+    const btn = document.getElementById('toggleBtn');
+    btn.textContent = 'Player Detection Boxes: ' + (showBoxes ? 'ON' : 'OFF');
+    btn.classList.toggle('off', !showBoxes);
+  }}
+
+  vid.addEventListener('loadedmetadata', () => {{ resizeCanvas(); drawFrame(); }});
+  window.addEventListener('resize', resizeCanvas);
+</script>
+"""
+
+
+def build_ball_html(video_url: str, frame_ball_boxes: dict, frame_kalman: dict,
+                    frame_w: int, frame_h: int, fps: float) -> str:
+    ball_json   = json.dumps(frame_ball_boxes)
+    kalman_json = json.dumps(frame_kalman)
+    return f"""
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ background: #000; }}
+
+  #player-wrap {{
+    position: relative;
+    width: 100%;
+    background: #000;
+  }}
+  #vid {{
+    width: 100%;
+    height: auto;
+    display: block;
+  }}
+  #overlay {{
+    position: absolute;
+    top: 0; left: 0;
+    pointer-events: none;
+  }}
+  #controls {{
+    height: 44px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    background: #111;
+  }}
+  .toggleBtn {{
+    padding: 5px 18px;
+    font-size: 13px;
+    font-weight: bold;
+    border-radius: 6px;
+    cursor: pointer;
+  }}
+  #ballBoxBtn {{
+    border: 2px solid #ffff00;
+    background: #ffff00;
+    color: #fff;
+  }}
+  #ballBoxBtn.off {{
+    background: #333;
+    border-color: #555;
+    color: #aaa;
+  }}
+  #kalmanBtn {{
+    border: 2px solid #ff2222;
+    background: #ff2222;
+    color: #fff;
+  }}
+  #kalmanBtn.off {{
+    background: #333;
+    border-color: #555;
+    color: #aaa;
+  }}
+</style>
+
+<div id="controls">
+  <button id="ballBoxBtn" class="toggleBtn" onclick="toggleBallBox()">Ball Box: ON</button>
+  <button id="kalmanBtn"  class="toggleBtn" onclick="toggleKalman()">Kalman Prediction: ON</button>
+</div>
+<div id="player-wrap">
+  <video id="vid" controls>
+    <source src="{video_url}" type="video/mp4">
+  </video>
+  <canvas id="overlay"></canvas>
+</div>
+
+<script>
+  const BALL_BOXES = {ball_json};
+  const KALMAN     = {kalman_json};
+  const FPS   = {fps};
+  const VID_W = {frame_w};
+  const VID_H = {frame_h};
+  let showBallBox = true;
+  let showKalman  = true;
+
+  const vid    = document.getElementById('vid');
+  const canvas = document.getElementById('overlay');
+  const ctx    = canvas.getContext('2d');
+
+  function resizeCanvas() {{
+    canvas.width        = vid.clientWidth;
+    canvas.height       = vid.clientHeight;
+    canvas.style.width  = vid.clientWidth  + 'px';
+    canvas.style.height = vid.clientHeight + 'px';
+  }}
+
+  function drawFrame() {{
+    resizeCanvas();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const frameIdx = String(Math.floor(vid.currentTime * FPS));
+    const scaleX   = canvas.width  / VID_W;
+    const scaleY   = canvas.height / VID_H;
+
+    if (showBallBox && BALL_BOXES[frameIdx]) {{
+      const [x1, y1, x2, y2, conf] = BALL_BOXES[frameIdx];
+      ctx.strokeStyle = '#ffff00';
+      ctx.lineWidth   = 3;
+      ctx.strokeRect(x1*scaleX, y1*scaleY, (x2-x1)*scaleX, (y2-y1)*scaleY);
+      ctx.fillStyle = '#ffff00';
+      ctx.font      = 'bold 13px sans-serif';
+      ctx.fillText(Math.round(conf*100) + '%', x1*scaleX + 2, y1*scaleY - 4);
+    }}
+
+    if (showKalman && KALMAN[frameIdx]) {{
+      const [px, py] = KALMAN[frameIdx];
+      ctx.strokeStyle = '#ff2222';
+      ctx.lineWidth   = 2;
+      ctx.beginPath();
+      ctx.arc(px*scaleX, py*scaleY, 12, 0, 2*Math.PI);
+      ctx.stroke();
+    }}
+
+    requestAnimationFrame(drawFrame);
+  }}
+
+  function toggleBallBox() {{
+    showBallBox = !showBallBox;
+    const btn = document.getElementById('ballBoxBtn');
+    btn.textContent = 'Ball Box: ' + (showBallBox ? 'ON' : 'OFF');
+    btn.classList.toggle('off', !showBallBox);
+  }}
+
+  function toggleKalman() {{
+    showKalman = !showKalman;
+    const btn = document.getElementById('kalmanBtn');
+    btn.textContent = 'Kalman Prediction: ' + (showKalman ? 'ON' : 'OFF');
+    btn.classList.toggle('off', !showKalman);
+  }}
+
+  vid.addEventListener('loadedmetadata', () => {{ resizeCanvas(); drawFrame(); }});
+  window.addEventListener('resize', resizeCanvas);
+</script>
+"""
+
+
+def build_smart_crop_html(video_url: str, frame_ball_boxes: dict,
+                           frame_pred: dict, fps: float) -> str:
+    ball_json = json.dumps(frame_ball_boxes)
+    pred_json = json.dumps(frame_pred)
+    return f"""
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ background: #000; display: flex; flex-direction: column; align-items: center; }}
+
+  #controls {{
+    width: 100%;
+    max-width: 420px;
+    height: 44px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 4px 8px;
+    background: #111;
+  }}
+  .toggleBtn {{
+    padding: 5px 14px;
+    font-size: 13px;
+    font-weight: bold;
+    border-radius: 6px;
+    cursor: pointer;
+  }}
+  #ballBoxBtn {{
+    border: 2px solid #ffff00;
+    background: #ffff00;
+    color: #000;
+  }}
+  #ballBoxBtn.off {{
+    background: #333;
+    border-color: #555;
+    color: #aaa;
+  }}
+  #predBtn {{
+    border: 2px solid #ff6400;
+    background: #ff6400;
+    color: #fff;
+  }}
+  #predBtn.off {{
+    background: #333;
+    border-color: #555;
+    color: #aaa;
+  }}
+  #player-wrap {{
+    position: relative;
+    width: 100%;
+    max-width: 420px;
+    background: #000;
+  }}
+  #vid {{
+    width: 100%;
+    height: auto;
+    display: block;
+  }}
+  #overlay {{
+    position: absolute;
+    top: 0; left: 0;
+    pointer-events: none;
+  }}
+</style>
+
+<div id="controls">
+  <button id="ballBoxBtn" class="toggleBtn" onclick="toggleBallBox()">Ball Box: ON</button>
+  <button id="predBtn"    class="toggleBtn" onclick="togglePred()">Tracker Prediction: ON</button>
+</div>
+<div id="player-wrap">
+  <video id="vid" controls>
+    <source src="{video_url}" type="video/mp4">
+  </video>
+  <canvas id="overlay"></canvas>
+</div>
+
+<script>
+  const BALL_BOXES = {ball_json};
+  const PRED       = {pred_json};
+  const FPS        = {fps};
+  let showBallBox = true;
+  let showPred    = true;
+
+  const vid    = document.getElementById('vid');
+  const canvas = document.getElementById('overlay');
+  const ctx    = canvas.getContext('2d');
+
+  function resizeCanvas() {{
+    canvas.width        = vid.clientWidth;
+    canvas.height       = vid.clientHeight;
+    canvas.style.width  = vid.clientWidth  + 'px';
+    canvas.style.height = vid.clientHeight + 'px';
+  }}
+
+  function drawFrame() {{
+    resizeCanvas();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const frameIdx = String(Math.floor(vid.currentTime * FPS));
+    const scaleX   = canvas.width  / 540;
+    const scaleY   = canvas.height / 960;
+
+    if (showBallBox && BALL_BOXES[frameIdx]) {{
+      const [x1, y1, x2, y2, conf] = BALL_BOXES[frameIdx];
+      ctx.strokeStyle = '#ffff00';
+      ctx.lineWidth   = 3;
+      ctx.strokeRect(x1*scaleX, y1*scaleY, (x2-x1)*scaleX, (y2-y1)*scaleY);
+      ctx.fillStyle = '#ffff00';
+      ctx.font      = 'bold 13px sans-serif';
+      ctx.fillText(Math.round(conf*100) + '%', x1*scaleX + 2, Math.max(14, y1*scaleY - 4));
+    }}
+
+    if (showPred && PRED[frameIdx]) {{
+      const [px, py] = PRED[frameIdx];
+      ctx.strokeStyle = '#ff6400';
+      ctx.lineWidth   = 2;
+      ctx.beginPath();
+      ctx.arc(px*scaleX, py*scaleY, 14, 0, 2*Math.PI);
+      ctx.stroke();
+    }}
+
+    requestAnimationFrame(drawFrame);
+  }}
+
+  function toggleBallBox() {{
+    showBallBox = !showBallBox;
+    const btn = document.getElementById('ballBoxBtn');
+    btn.textContent = 'Ball Box: ' + (showBallBox ? 'ON' : 'OFF');
+    btn.classList.toggle('off', !showBallBox);
+  }}
+
+  function togglePred() {{
+    showPred = !showPred;
+    const btn = document.getElementById('predBtn');
+    btn.textContent = 'Tracker Prediction: ' + (showPred ? 'ON' : 'OFF');
+    btn.classList.toggle('off', !showPred);
+  }}
+
+  vid.addEventListener('loadedmetadata', () => {{ resizeCanvas(); drawFrame(); }});
+  window.addEventListener('resize', resizeCanvas);
+</script>
+"""
