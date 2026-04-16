@@ -6,6 +6,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import streamlit as st
+from scipy.ndimage import gaussian_filter1d
 
 _BASE = Path(__file__).resolve().parent.parent
 
@@ -21,22 +22,55 @@ def _load(module_name: str, file_path: Path):
 
 _sc = _load("smartCroppingVideos",
             _BASE / "cropping" / "smartCroppingVideos.py")
-_bd = _load("ball_detection",
-            _BASE / "detection" / "ball-detection" / "ball_detection.py")
 
 # Re-export names so the IDE and callers can see them
-BallTracker:    type  = _sc.BallTracker
-check_ball            = _sc.check_ball
-CONF:           float = _sc.CONF
-IMGSZ:          int   = _sc.IMGSZ
-SMOOTHING_LIVE: float = _sc.SMOOTHING_LIVE
-SMOOTHING_HOLD: float = _sc.SMOOTHING_HOLD
-MAX_MOVE_LIVE:  int   = _sc.MAX_MOVE_LIVE
-MAX_MOVE_HOLD:  int   = _sc.MAX_MOVE_HOLD
 cropped_width:  int   = _sc.cropped_width
 cropped_height: int   = _sc.cropped_height
 
-kalman_filter         = _bd.kalman_filter
+GAUSSIAN_SIGMA:        int   = 15
+BALL_MIN_AREA_FRAC:    float = 0.0001
+BALL_MAX_AREA_FRAC:    float = 0.02
+OUTLIER_MAD_THRESHOLD: float = 3.0
+
+
+# ─── Shared crop helpers ──────────────────────────────────────────────────────
+
+def _choose_best_ball(boxes, ball_class_id: int):
+    """Return (box_xyxy, confidence) for the highest-conf sports ball, or None."""
+    if boxes is None or len(boxes) == 0:
+        return None
+    confs        = boxes.conf.cpu().numpy()
+    classes      = boxes.cls.cpu().numpy().astype(int)
+    ball_indices = np.where(classes == ball_class_id)[0]
+    if ball_indices.size == 0:
+        return None
+    best = ball_indices[np.argmax(confs[ball_indices])]
+    return boxes.xyxy[best].cpu().numpy(), float(confs[best])
+
+
+def _is_valid_ball_size(box_xyxy, frame_w: int, frame_h: int) -> bool:
+    """Return True if the bounding box area is within a plausible basketball range."""
+    x1, y1, x2, y2 = box_xyxy
+    frac = (x2 - x1) * (y2 - y1) / (frame_w * frame_h)
+    return BALL_MIN_AREA_FRAC <= frac <= BALL_MAX_AREA_FRAC
+
+
+def _reject_spatial_outliers(known_indices: list, known_x1s: list,
+                              known_cxs: list) -> tuple:
+    """Remove detections whose cx is a MAD-sigma outlier across the full clip."""
+    if len(known_cxs) < 4:
+        return known_indices, known_x1s
+    cx_arr    = np.array(known_cxs, dtype=np.float64)
+    median_cx = np.median(cx_arr)
+    mad       = np.median(np.abs(cx_arr - median_cx))
+    if mad < 1e-6:
+        return known_indices, known_x1s
+    z    = np.abs(cx_arr - median_cx) / (mad / 0.6745)
+    mask = z <= OUTLIER_MAD_THRESHOLD
+    return (
+        [known_indices[i] for i in range(len(known_indices)) if mask[i]],
+        [known_x1s[i]     for i in range(len(known_x1s))     if mask[i]],
+    )
 
 
 # ─── Player detection ─────────────────────────────────────────────────────────
@@ -106,25 +140,22 @@ def process_ball_video(video_path, model):
     frame_h      = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     cap.release()
 
-    kf             = kalman_filter()
-    kf_initialized = False
-
     clean_frames     = []
     frame_ball_boxes = {}   # {str(i): [x1, y1, x2, y2, conf]}
-    frame_kalman     = {}   # {str(i): [px, py]}
     ball_counts      = []
+    known_indices    = []
+    known_cxs        = []
+    known_cys        = []
 
     progress = st.progress(0, text="Running ball detection...")
     start    = time.time()
 
+    # Pass 1 — detect ball in every frame
     for i, result in enumerate(model.predict(
             source=video_path, classes=[ball_class_id], stream=True,
             save=False, conf=0.20, iou=0.4, imgsz=768)):
         frame_rgb = cv2.cvtColor(result.orig_img, cv2.COLOR_BGR2RGB)
         clean_frames.append(frame_rgb.copy())
-
-        pred = kf.predict()
-        px, py = float(pred[0]), float(pred[1])
 
         have_det = False
         if result.boxes is not None and len(result.boxes) > 0:
@@ -138,144 +169,151 @@ def process_ball_video(video_path, model):
                 conf = float(confs[idx])
                 cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
 
-                measurement = np.array([[np.float32(cx)], [np.float32(cy)]])
-                if not kf_initialized:
-                    kf.statePre[:2]  = measurement
-                    kf.statePost[:2] = measurement
-                    kf_initialized   = True
-
-                kf.correct(measurement)
-
-                if conf > 0.6:
-                    kf.statePre[:2]  = measurement
-                    kf.statePost[:2] = measurement
-
                 frame_ball_boxes[str(i)] = [x1, y1, x2, y2, conf]
+                known_indices.append(i)
+                known_cxs.append(cx)
+                known_cys.append(cy)
                 have_det = True
 
         ball_counts.append(1 if have_det else 0)
-
-        if kf_initialized:
-            frame_kalman[str(i)] = [px, py]
 
         if total_frames > 0:
             progress.progress(min((i + 1) / total_frames, 1.0),
                               text=f"Frame {i+1}/{total_frames} — {'ball detected' if have_det else 'no ball'}")
 
     progress.empty()
-    return (clean_frames, frame_ball_boxes, frame_kalman,
+
+    # Pass 1.5 — gap-fill then Gaussian smooth the full cx/cy trajectory
+    n = len(clean_frames)
+    frame_gaussian = {}
+    if known_indices and n > 0:
+        all_indices = np.arange(n)
+        smooth_cx = gaussian_filter1d(
+            np.interp(all_indices, known_indices, known_cxs),
+            sigma=GAUSSIAN_SIGMA, mode="nearest",
+        )
+        smooth_cy = gaussian_filter1d(
+            np.interp(all_indices, known_indices, known_cys),
+            sigma=GAUSSIAN_SIGMA, mode="nearest",
+        )
+        for i in range(n):
+            frame_gaussian[str(i)] = [float(smooth_cx[i]), float(smooth_cy[i])]
+
+    return (clean_frames, frame_ball_boxes, frame_gaussian,
             ball_counts, frame_w, frame_h, fps, time.time() - start)
 
 
 # ─── Smart crop ───────────────────────────────────────────────────────────────
 
 def process_smart_crop_video(video_path, model):
-    ball_cls = [k for k, v in model.names.items() if v == "sports ball"][0]
+    ball_class_id = [k for k, v in model.names.items() if v == "sports ball"][0]
 
     cap          = cv2.VideoCapture(video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     fps          = cap.get(cv2.CAP_PROP_FPS) or 30
+    frame_w      = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    frame_h      = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    cap.release()
 
-    ret, frame = cap.read()
-    if not ret:
-        cap.release()
-        return None
+    target_w = min(int(frame_h * 9 / 16), frame_w)
+    max_x1   = frame_w - target_w
 
-    h, w      = frame.shape[:2]
-    target_w  = min(int(round(h * 9 / 16)), w)
-    max_x     = w - target_w
-    half_w    = target_w / 2.0
-    cx_min, cx_max = half_w, w - half_w
-    sx = cropped_width  / target_w
-    sy = cropped_height / h
-
-    cropped_frames        = []
-    frame_ball_boxes_crop = {}   # {str(i): [x1,y1,x2,y2,conf]} in cropped_width×cropped_height space
-    frame_pred_crop       = {}   # {str(i): [px,py]}             in cropped_width×cropped_height space
-
-    crop_cx = None
-    tracker = BallTracker()
-    fidx    = 0
+    clean_frames  = []
+    known_indices = []
+    known_x1s     = []
+    known_cxs     = []
+    known_cys     = []
+    idx_to_box    = {}   # frame index → (box_xyxy, conf)
 
     progress = st.progress(0, text="Running smart crop...")
     start    = time.time()
 
-    while True:
-        if frame is None:
-            break
+    # Pass 1 — detect ball in every frame, collect crop positions
+    for i, result in enumerate(model.predict(
+            source=video_path, classes=[ball_class_id], stream=True,
+            save=False, conf=0.20, iou=0.4, imgsz=768)):
+        clean_frames.append(cv2.cvtColor(result.orig_img, cv2.COLOR_BGR2RGB))
 
-        ball_box = None
-        live_cx  = None
-
-        res = model.predict(source=frame, imgsz=IMGSZ, conf=CONF,
-                            iou=0.4, verbose=False, classes=[ball_cls])
-        r = res[0]
-        if r.boxes is not None and len(r.boxes) > 0:
-            xyxy  = r.boxes.xyxy.cpu().numpy()   # type: ignore
-            confs = r.boxes.conf.cpu().numpy()   # type: ignore
-            good  = [i for i in range(len(xyxy))
-                     if check_ball(xyxy[i][0], xyxy[i][1], xyxy[i][2], xyxy[i][3], h)]
-            if good:
-                bi                  = good[int(np.argmax(confs[good]))]
-                bx1, by1, bx2, by2  = xyxy[bi]
-                dcx, dcy, dcnf      = (bx1+bx2)/2.0, (by1+by2)/2.0, float(confs[bi])
-                if not tracker.is_outlier(dcx, dcy, fidx):
-                    ball_box = (bx1, by1, bx2, by2, dcnf)
-                    tracker.update(fidx, dcx, dcy, dcnf)
-                    live_cx = dcx
-                else:
-                    tracker.tick_miss()
-            else:
-                tracker.tick_miss()
-        else:
-            tracker.tick_miss()
-
-        if live_cx is not None:
-            sm, mm    = SMOOTHING_LIVE, MAX_MOVE_LIVE
-            target_cx = float(np.clip(live_cx, cx_min, cx_max))
-        else:
-            sm, mm    = SMOOTHING_HOLD, MAX_MOVE_HOLD
-            target_cx = crop_cx if crop_cx is not None else w / 2.0
-
-        if crop_cx is None:
-            crop_cx = target_cx
-        else:
-            new_cx = sm * crop_cx + (1 - sm) * target_cx
-            delta  = new_cx - crop_cx
-            if abs(delta) > mm:
-                new_cx = crop_cx + np.sign(delta) * mm
-            crop_cx = new_cx
-
-        cx1 = max(0, min(int(round(crop_cx - half_w)), max_x)) if max_x > 0 else 0
-
-        cropped = frame[:, cx1:cx1 + target_w]
-        resized = cv2.resize(cropped, (cropped_width, cropped_height))
-        cropped_frames.append(cv2.cvtColor(resized, cv2.COLOR_BGR2RGB))
-
-        if ball_box is not None:
-            bx1, by1, bx2, by2, bc = ball_box
-            frame_ball_boxes_crop[str(fidx)] = [
-                float((bx1 - cx1) * sx), float(by1 * sy),
-                float((bx2 - cx1) * sx), float(by2 * sy),
-                bc,
-            ]
-
-        pred = tracker.predict(fidx)
-        if pred is not None:
-            pcx, pcy, pcnf = pred
-            if pcnf == -1.0 or pcnf > 0.05:
-                frame_pred_crop[str(fidx)] = [float((pcx - cx1) * sx), float(pcy * sy)]
+        detection = _choose_best_ball(result.boxes, ball_class_id)
+        if detection is not None:
+            box_xyxy, conf = detection
+            if _is_valid_ball_size(box_xyxy, frame_w, frame_h):
+                cx = (box_xyxy[0] + box_xyxy[2]) / 2.0
+                cy = (box_xyxy[1] + box_xyxy[3]) / 2.0
+                x1 = float(np.clip(cx - target_w / 2.0, 0, max_x1))
+                known_indices.append(i)
+                known_x1s.append(x1)
+                known_cxs.append(cx)
+                known_cys.append(cy)
+                idx_to_box[i] = (box_xyxy, conf)
 
         if total_frames > 0:
-            progress.progress(min((fidx + 1) / total_frames, 1.0),
-                              text=f"Frame {fidx+1}/{total_frames}")
+            progress.progress(min((i + 1) / total_frames, 1.0),
+                              text=f"Frame {i+1}/{total_frames}")
 
-        ret, frame = cap.read()
-        if not ret:
-            break
-        fidx += 1
-
-    cap.release()
     progress.empty()
+
+    n = len(clean_frames)
+    if n == 0:
+        return None
+
+    # Outlier rejection — save cx/cy lookup first so we can re-align after
+    _cx_by_idx = dict(zip(known_indices, known_cxs))
+    _cy_by_idx = dict(zip(known_indices, known_cys))
+
+    known_indices, known_x1s = _reject_spatial_outliers(known_indices, known_x1s, known_cxs)
+    frame_boxes = {idx: idx_to_box[idx] for idx in known_indices if idx in idx_to_box}
+
+    known_cxs = [_cx_by_idx[i] for i in known_indices]
+    known_cys = [_cy_by_idx[i] for i in known_indices]
+
+    # Gap-fill via linear interpolation
+    all_idx = np.arange(n)
+    if len(known_indices) == 0:
+        raw_x1s = np.full(n, max_x1 / 2.0)
+        raw_cxs = np.full(n, frame_w  / 2.0)
+        raw_cys = np.full(n, frame_h  / 2.0)
+    else:
+        raw_x1s = np.interp(all_idx, known_indices, known_x1s)
+        raw_cxs = np.interp(all_idx, known_indices, known_cxs)
+        raw_cys = np.interp(all_idx, known_indices, known_cys)
+
+    # Pass 1.5 — Gaussian smooth the full trajectory (symmetric, no causal lag)
+    smoothed_x1s = np.clip(
+        gaussian_filter1d(raw_x1s, sigma=GAUSSIAN_SIGMA, mode="nearest"),
+        0, max_x1,
+    )
+    smoothed_cxs = gaussian_filter1d(raw_cxs, sigma=GAUSSIAN_SIGMA, mode="nearest")
+    smoothed_cys = gaussian_filter1d(raw_cys, sigma=GAUSSIAN_SIGMA, mode="nearest")
+
+    # Pass 2 — crop each frame using smoothed x1 positions, build overlay dicts
+    sx = cropped_width  / target_w
+    sy = cropped_height / frame_h
+
+    cropped_frames        = []
+    frame_ball_boxes_crop = {}
+    frame_pred_crop       = {}
+
+    for i, x1 in enumerate(smoothed_x1s):
+        x1_int  = int(round(x1))
+        frame   = clean_frames[i]   # already RGB
+        cropped = frame[:, x1_int: x1_int + target_w]
+        cropped_frames.append(cv2.resize(cropped, (cropped_width, cropped_height)))
+
+        if i in frame_boxes:
+            bx1, by1, bx2, by2 = frame_boxes[i][0]
+            conf = frame_boxes[i][1]
+            frame_ball_boxes_crop[str(i)] = [
+                float((bx1 - x1_int) * sx), float(by1 * sy),
+                float((bx2 - x1_int) * sx), float(by2 * sy),
+                conf,
+            ]
+
+        # Smoothed ball position mapped into cropped-frame coordinates
+        frame_pred_crop[str(i)] = [
+            float((smoothed_cxs[i] - x1_int) * sx),
+            float(smoothed_cys[i] * sy),
+        ]
+
     return (cropped_frames, frame_ball_boxes_crop, frame_pred_crop,
             fps, time.time() - start)
