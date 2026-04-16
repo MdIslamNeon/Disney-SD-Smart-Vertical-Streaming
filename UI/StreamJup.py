@@ -81,12 +81,12 @@ def load_model():
 
 # ─── Helpers ─────────────────────────────────────────────────────────────────
 
-def draw_boxes(frame, boxes, confidences):
-    for box, conf in zip(boxes, confidences):
+def draw_tracked_boxes(frame, boxes, track_ids):
+    for box, tid in zip(boxes, track_ids):
         x1, y1, x2, y2 = map(int, box)
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        cv2.putText(frame, f"{conf:.0%}", (x1, y1 - 6),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
+        cv2.putText(frame, f"ID {int(tid)}", (x1, max(0, y1 - 6)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
     return frame
 
 
@@ -201,25 +201,28 @@ def process_video(video_path, model):
     clean_frames     = []
     annotated_frames = []
     frame_counts     = []
-    frame_boxes      = {}     # {frame_index: [[x1,y1,x2,y2,conf], ...]}
+    frame_boxes      = {}     # {frame_index: [[x1,y1,x2,y2,track_id], ...]}
     progress         = st.progress(0, text="Running player detection...")
     start            = time.time()
 
-    for i, result in enumerate(model.predict(
+    for i, result in enumerate(model.track(
             source=video_path, classes=[0], stream=True,
-            save=False, conf=0.50, iou=0.95)):
-        frame_rgb   = cv2.cvtColor(result.orig_img, cv2.COLOR_BGR2RGB)
-        boxes       = result.boxes.xyxy.cpu().numpy() if result.boxes else np.empty((0, 4))
-        confidences = result.boxes.conf.cpu().numpy() if result.boxes else np.empty(0)
+            imgsz=416, conf=0.35, iou=0.8,
+            persist=True, tracker="bytetrack.yaml", verbose=False)):
+        frame_rgb  = cv2.cvtColor(result.orig_img, cv2.COLOR_BGR2RGB)
+        boxes      = result.boxes.xyxy.cpu().numpy() if result.boxes else np.empty((0, 4))
+        track_ids  = (result.boxes.id.cpu().numpy()
+                      if result.boxes is not None and result.boxes.id is not None
+                      else np.zeros(len(boxes)))
 
         clean_frames.append(frame_rgb.copy())
-        annotated_frames.append(draw_boxes(frame_rgb.copy(), boxes, confidences))
+        annotated_frames.append(draw_tracked_boxes(frame_rgb.copy(), boxes, track_ids))
         frame_counts.append(int(len(boxes)))
 
         if len(boxes):
             frame_boxes[str(i)] = [
-                [float(x1), float(y1), float(x2), float(y2), float(c)]
-                for (x1, y1, x2, y2), c in zip(boxes, confidences)
+                [float(x1), float(y1), float(x2), float(y2), int(tid)]
+                for (x1, y1, x2, y2), tid in zip(boxes, track_ids)
             ]
 
         if total_frames > 0:
@@ -536,11 +539,11 @@ def build_player_html(video_url: str, frame_boxes: dict,
       ctx.fillStyle   = '#00ff44';
       ctx.font        = 'bold 13px sans-serif';
 
-      for (const [x1, y1, x2, y2, conf] of frameData) {{
+      for (const [x1, y1, x2, y2, tid] of frameData) {{
         const sx = x1 * scaleX, sy = y1 * scaleY;
         const sw = (x2 - x1) * scaleX, sh = (y2 - y1) * scaleY;
         ctx.strokeRect(sx, sy, sw, sh);
-        ctx.fillText(Math.round(conf * 100) + '%', sx + 2, sy - 4);
+        ctx.fillText('ID ' + tid, sx + 2, Math.max(sy - 4, 12));
       }}
     }}
     requestAnimationFrame(drawFrame);
