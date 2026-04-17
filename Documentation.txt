@@ -9,7 +9,7 @@ using YOLOv8 detection + ByteTrack multi-object tracking (via ultralytics).
 
 Three core features are exposed through the Streamlit UI:
   1. Player Detection  — detects and tracks people with bounding boxes + IDs
-  2. Ball Detection    — detects the basketball using YOLO + Kalman filter smoothing
+  2. Ball Detection    — detects the basketball using YOLO + Gaussian filter smoothing
   3. Smart Crop        — auto-reframes the video to 9:16 following the ball
 
 
@@ -19,29 +19,38 @@ Disney-SD-Smart-Vertical-Streaming/
 ├── UI/
 │   ├── StreamJup.py          # Main Streamlit app — entry point for the UI
 │   ├── detection.py          # Processing engine: process_video, process_ball_video,
-│   │                         #   process_smart_crop_video. Imports utilities from
-│   │                         #   cropping/smartCroppingVideos.py and
-│   │                         #   detection/ball-detection/ball_detection.py
+│   │                         #   process_smart_crop_video. Pulls detection logic and
+│   │                         #   helpers from the standalone scripts via importlib so
+│   │                         #   there is a single source of truth for all logic.
 │   ├── html_builders.py      # Builds HTML/JS video player pages (player, ball, smart crop)
 │   └── video_utils.py        # render_video() and _start_video_server() — writes frames
 │                             #   to a temp H.264 MP4 and serves it over HTTP with
 │                             #   range-request support for browser video seeking
 ├── cropping/
-│   ├── smartCroppingVideos.py  # BallTracker class, check_ball(), tuning constants
-│   │                           #   (cropped_width/height, smoothing params). Imported
-│   │                           #   by UI/detection.py. Also runnable standalone.
-│   ├── smartCroppingImages.py  # Image-based smart cropping (standalone)
-│   ├── reframe_9x16.py         # Earlier 9:16 reframing prototype (may be removed)
-│   └── read-and-crop.py        # Basic video read and crop utility
+│   ├── smartCroppingVideos.py  # Source of truth for crop constants and BallTracker.
+│   │                           #   Exports: cropped_width=540, cropped_height=960,
+│   │                           #   BallTracker class, check_ball(). Loaded by
+│   │                           #   UI/detection.py. Also runnable standalone.
+│   │                           #   Groundwork for future livestream smart cropping.
+│   ├── smartCroppingImages.py  # Image-based smart cropping from Kaggle DeepSport dataset
+│   │                           #   (standalone only — NOT used by the UI).
+│   │                           #   Groundwork for future image-based cropping pipeline.
+│   ├── reframe_9x16.py         # Alternative motion-based 9:16 reframing using player
+│   │                           #   speed/saliency instead of ball position (standalone only).
+│   │                           #   Groundwork for an alternative cropping strategy.
+│   └── read-and-crop.py        # Basic centered 9:16 crop utility (no AI). Standalone only.
 ├── detection/
 │   ├── ball-detection/
-│   │   └── ball_detection.py   # kalman_filter() factory + standalone ball detection
-│   │                           #   script with cv2 window output. kalman_filter()
-│   │                           #   is imported by UI/detection.py.
+│   │   └── ball_detection.py   # Source of truth for ball detection logic.
+│   │                           #   Exports: GAUSSIAN_SIGMA, _choose_best_ball,
+│   │                           #   _is_valid_ball_size, _reject_spatial_outliers.
+│   │                           #   Loaded by UI/detection.py. Also runnable standalone:
+│   │                           #   2-pass pipeline writing annotated MP4 to output/.
 │   └── player-detection/
-│       └── player_detection.py # Standalone player tracking script — reads from
-│                               #   videos/, writes annotated MP4 to output/,
-│                               #   shows live cv2 window. NOT imported by the UI.
+│       └── player_detection.py # Source of truth for player tracking logic.
+│                               #   Exports: draw_tracked_boxes.
+│                               #   Loaded by UI/detection.py. Also runnable standalone:
+│                               #   ByteTrack tracking writing annotated MP4 to output/.
 ├── tests/
 │   ├── ball_detector_test.py
 │   ├── ball_framing_integration_test.py
@@ -61,65 +70,217 @@ Disney-SD-Smart-Vertical-Streaming/
 └── Documentation.txt
 
 
+FILES USED BY THE UI
+--------------------
+All detection logic has a single source of truth. UI/detection.py pulls symbols
+from the standalone scripts via importlib — it does not re-implement anything.
+
+  UI/StreamJup.py               — entry point
+  UI/detection.py               — processing engine (consumer of all modules below)
+  UI/html_builders.py           — HTML/JS video players with canvas overlays
+  UI/video_utils.py             — video encoding and HTTP serving
+
+  cropping/smartCroppingVideos.py
+    — loaded by detection.py for: cropped_width, cropped_height, BallTracker
+
+  detection/ball-detection/ball_detection.py
+    — loaded by detection.py for: GAUSSIAN_SIGMA, _choose_best_ball,
+      _is_valid_ball_size, _reject_spatial_outliers
+
+  detection/player-detection/player_detection.py
+    — loaded by detection.py for: draw_tracked_boxes
+
+NOT USED BY THE UI (standalone only / groundwork for future expansion):
+  cropping/smartCroppingImages.py
+    — Groundwork for expanding into image-level smart cropping.
+  cropping/reframe_9x16.py
+    — Groundwork for an alternative player-motion-based crop mode.
+  cropping/read-and-crop.py
+    — Simple centered crop baseline utility. No AI.
+  tests/
+    — Test suite. Uses kagglehub to pull real basketball footage for testing.
+
+
+SYSTEM ARCHITECTURE AND UI PIPELINE
+-------------------------------------
+
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                        MODULE LOADING (once at startup)         │
+  │                                                                 │
+  │  UI/detection.py  ──importlib──▶  smartCroppingVideos.py        │
+  │                                    cropped_width, cropped_height│
+  │                                    BallTracker                  │
+  │                   ──importlib──▶  ball_detection.py             │
+  │                                    GAUSSIAN_SIGMA               │
+  │                                    _choose_best_ball            │
+  │                                    _is_valid_ball_size          │
+  │                                    _reject_spatial_outliers     │
+  │                   ──importlib──▶  player_detection.py           │
+  │                                    draw_tracked_boxes           │
+  └─────────────────────────────────────────────────────────────────┘
+
+  ┌─────────────────────────────────────────────────────────────────┐
+  │                        UI REQUEST PIPELINE                      │
+  │                                                                 │
+  │  1. User uploads video (mp4/avi/mov) via StreamJup.py           │
+  │     └─ file saved to temp path, persisted in st.session_state   │
+  │                                                                 │
+  │  2. User clicks one of three buttons                            │
+  │     └─ StreamJup.py calls the matching pipeline in detection.py │
+  │                                                                 │
+  │  ┌── Player Detection ────────────────────────────────────────┐ │
+  │  │  detection.py: process_video(video_path, model)            │ │
+  │  │    Pass 1 — model.track() with ByteTrack (COCO class 0)    │ │
+  │  │              yields per-frame boxes + track IDs            │ │
+  │  │              draw_tracked_boxes() annotates each frame     │ │
+  │  │    Returns — clean frames, annotated frames, per-frame     │ │
+  │  │              counts, box metadata, dimensions, fps, time   │ │
+  │  └────────────────────────────────────────────────────────────┘ │
+  │                                                                 │
+  │  ┌── Ball Detection ──────────────────────────────────────────┐ │
+  │  │  detection.py: process_ball_video(video_path, model)       │ │
+  │  │    Pass 1 — model.predict() (COCO class 32, sports ball)   │ │
+  │  │              _choose_best_ball() picks highest-conf det.   │ │
+  │  │              _is_valid_ball_size() filters bad boxes       │ │
+  │  │    Pass 1.5 — _reject_spatial_outliers() removes false     │ │
+  │  │              positives via MAD-sigma on cx trajectory      │ │
+  │  │              gap-fill with np.interp across all frames     │ │
+  │  │              gaussian_filter1d() smooths cx/cy (sigma=15)  │ │
+  │  │    Returns — clean frames, per-frame raw boxes, per-frame  │ │
+  │  │              Gaussian-smoothed positions, counts, fps, time│ │
+  │  └────────────────────────────────────────────────────────────┘ │
+  │                                                                 │
+  │  ┌── Smart Crop ──────────────────────────────────────────────┐ │
+  │  │  detection.py: process_smart_crop_video(video_path, model) │ │
+  │  │    Pass 1 — same ball detection as Ball Detection above    │ │
+  │  │    Pass 1.5 — same gap-fill + Gaussian smooth on cx/cy     │ │
+  │  │              derive crop window x1 from smoothed ball cx   │ │
+  │  │              np.clip keeps window within frame bounds      │ │
+  │  │    Pass 2 — slice each frame to target_w crop window       │ │
+  │  │              cv2.resize to 540x960 (cropped_width/height)  │ │
+  │  │              remap ball box coords into cropped space      │ │
+  │  │    Returns — 540x960 cropped frames, remapped ball boxes,  │ │
+  │  │              smoothed center coords, fps, time             │ │
+  │  └────────────────────────────────────────────────────────────┘ │
+  │                                                                 │
+  │  3. Results stored in st.session_state (survive reruns)         │
+  │                                                                 │
+  │  4. video_utils.py: render_video()                              │
+  │     └─ encodes RGB frame list to H.264 MP4 via OpenCV           │
+  │     └─ _start_video_server() spawns HTTP server (range-request  │
+  │        support required for browser seek)                       │
+  │                                                                 │
+  │  5. html_builders.py builds the interactive player              │
+  │     └─ HTML5 <video> + <canvas> overlay                         │
+  │     └─ box/circle data embedded as JSON in JavaScript           │
+  │     └─ requestAnimationFrame syncs overlay to video playback    │
+  │     └─ toggle buttons show/hide detection overlays              │
+  │                                                                 │
+  │  6. StreamJup.py renders the HTML in a Streamlit <iframe>       │
+  └─────────────────────────────────────────────────────────────────┘
+
+
 UI MODULE BREAKDOWN
 -------------------
 StreamJup.py
   - Handles file upload, session state, button layout, metrics display, and tabs.
   - Calls the three process_* functions from detection.py on button click.
+  - Loads YOLOv8m model once at startup via @st.cache_resource.
   - Uses html_builders.py to embed the video player into an iframe.
   - Uses video_utils.py to encode and serve the processed video.
 
 detection.py
+  - Single import point for all detection logic. Uses importlib to load three
+    external modules at startup (smartCroppingVideos, ball_detection,
+    player_detection) so UI code only calls functions — no logic is duplicated.
   - process_video(video_path, model)
       Runs YOLOv8 + ByteTrack on every frame (classes=[0], person only).
       Returns clean frames, annotated frames, per-frame counts, bounding boxes,
       video dimensions, fps, and elapsed time.
   - process_ball_video(video_path, model)
-      Runs YOLOv8 predict for the sports ball class with Kalman filter smoothing.
-      Returns clean frames, per-frame ball boxes, Kalman predictions, counts,
+      2-pass pipeline: detects sports ball (COCO class 32) using _choose_best_ball
+      and _is_valid_ball_size, rejects outliers with _reject_spatial_outliers,
+      gap-fills and Gaussian-smooths (sigma=15) the ball center trajectory.
+      Returns clean frames, per-frame ball boxes, smoothed positions, counts,
       video dimensions, fps, and elapsed time.
   - process_smart_crop_video(video_path, model)
-      Runs ball detection frame-by-frame, smooths the crop center with
-      BallTracker, and returns cropped 9:16 frames in cropped_width x cropped_height
-      (540x960) space along with ball boxes and predictions.
-  - Dynamically loads smartCroppingVideos.py and ball_detection.py at import time
-    using importlib so they can live outside the UI/ directory.
+      Runs the same ball detection and smoothing pipeline, then derives a
+      Gaussian-smoothed crop window from the ball center. Crops and resizes
+      each frame to 540x960. Returns cropped frames, remapped ball boxes,
+      smoothed center coords, fps, and elapsed time.
 
 html_builders.py
   - build_player_html(url, frame_boxes, frame_w, frame_h, fps)
       HTML5 video + canvas overlay with requestAnimationFrame loop.
-      Player bounding box data is embedded as JSON; toggled via checkbox.
-  - build_ball_html(url, frame_ball_boxes, frame_kalman, frame_w, frame_h, fps)
-      Same structure, draws ball detection box and Kalman prediction circle.
+      Player bounding box data embedded as JSON; toggled via button.
+  - build_ball_html(url, frame_ball_boxes, frame_gaussian, frame_w, frame_h, fps)
+      Same structure; draws ball detection box and Gaussian-smoothed position circle.
+      Two independent toggle buttons (raw box / smoothed circle).
   - build_smart_crop_html(url, sc_ball_boxes, sc_pred, fps)
-      Cropped 9:16 video player with ball box and prediction overlays.
+      540x960 video player with ball box and trajectory prediction circle overlays.
 
 video_utils.py
   - render_video(frames, fps, label) -> str
       Encodes a list of RGB frames to a temp H.264 (avc1) MP4 file using
       OpenCV VideoWriter. Returns the file path.
   - _start_video_server(video_path, label) -> str
-      Shuts down any existing server for that label, starts a new
-      HTTPServer on a random port serving the video directory.
-      Supports HTTP range requests so browsers can seek without
-      downloading the whole file. Silences ConnectionResetError noise
-      caused by browsers closing connections early.
+      Shuts down any existing server for that label, starts a new HTTPServer
+      on a random port serving the video directory. Supports HTTP range requests
+      so browsers can seek without downloading the whole file.
+  - Cleans up all temp MP4 files at process exit via atexit.
 
 
 STANDALONE SCRIPTS
 ------------------
-detection/player-detection/player_detection.py
-  - Run directly to process all videos in videos/ and save annotated MP4s to output/.
-  - Shows a live cv2 window during processing.
-  - Uses ByteTrack (model.track tracker="bytetrack.yaml").
-
 detection/ball-detection/ball_detection.py
-  - Run directly for ball detection with Kalman filter overlay in a cv2 window.
-  - kalman_filter() is also imported by the UI via detection.py.
+  - Source of truth for all ball detection helpers (see FILES USED BY THE UI).
+  - Run directly to process all videos in videos/ and save annotated output to output/.
+  - 2-pass pipeline: detect all frames → outlier rejection → gap-fill → Gaussian smooth.
+  - Renders green box (raw YOLO detection) + red circle (Gaussian-smoothed center).
+
+detection/player-detection/player_detection.py
+  - Source of truth for draw_tracked_boxes (see FILES USED BY THE UI).
+  - Run directly to process all videos in videos/ and save annotated output to output/.
+  - Uses ByteTrack (model.track tracker="bytetrack.yaml"), COCO class 0 (person).
+  - Shows live cv2 window during processing with per-frame FPS overlay.
 
 cropping/smartCroppingVideos.py
+  - Source of truth for crop constants and BallTracker (see FILES USED BY THE UI).
   - Run directly to produce smart-cropped 9:16 output videos and debug overlays.
-  - BallTracker, check_ball(), and tuning constants are imported by the UI.
+  - BallTracker uses polynomial trajectory fitting (weighted least-squares, degree 1 or 2)
+    and per-frame outlier detection via prediction-vs-actual distance.
+  - BallTracker is stateful and frame-by-frame, making it well-suited for future
+    adaptation to live stream cropping.
+
+cropping/smartCroppingImages.py
+  - Processes still images from the Kaggle DeepSport dataset.
+  - Detects ball in each image, saves cropped 540x960 PNGs. Falls back to
+    previous frame's crop location when detection fails.
+  - NOT used by the UI. Groundwork for expanding into image-based smart cropping.
+
+cropping/reframe_9x16.py
+  - Alternative reframing strategy: tracks player movement speeds per ID using
+    SaliencySelector class, selects the top-K fastest movers as the crop focus
+    instead of following the ball.
+  - Depends on yolox package (noted as a migration candidate to ultralytics ByteTrack).
+  - NOT used by the UI. Groundwork for an alternative or complementary crop mode.
+
+cropping/read-and-crop.py
+  - Simple utility: reads MP4s from a Kaggle dataset, applies a centered 9:16 crop
+    (no AI), writes 540x960 MP4s. Useful as a baseline for crop dimension testing.
+
+
+FUTURE WORK / EXPANSION
+------------------------
+- The smartCroppingVideos.py and smartCroppingImages.py scripts establish the
+  foundation for expanding this project into live stream smart cropping:
+    - BallTracker is already stateful and processes frame-by-frame, so it can be
+      adapted to a streaming context with minimal changes.
+    - smartCroppingImages.py provides the image-level detection fallback strategy
+      needed when frames have no ball detection.
+    - reframe_9x16.py provides an alternative player-motion-based crop strategy
+      that could be plugged in as a third cropping mode or used as a fallback when
+      ball detection confidence is low.
 
 
 SETUP
@@ -154,15 +315,16 @@ If the .bat launcher is broken (stale venv path), run manually:
 KEY DEPENDENCIES
 ----------------
 - ultralytics    — YOLOv8 inference + ByteTrack tracker (model.track / model.predict)
-- opencv-python  — Video I/O, frame processing, Kalman filter, H.264 encoding
+- opencv-python  — Video I/O, frame processing, H.264 encoding
 - streamlit      — Web UI framework
-- numpy          — Array math, polynomial fitting (ball trajectory)
+- numpy          — Array math, interpolation (gap-fill), crop window clamping
+- scipy          — Gaussian filtering (ball center smoothing), MAD-based outlier rejection
 - torch          — CUDA device detection (used by standalone scripts)
 - tqdm           — Progress bars in standalone scripts
-- scipy, kagglehub
+- kagglehub      — Dataset download (used by cropping scripts and tests only)
 
 
-KNOWN ISSUES / PENDING WORK
+KNOWN ISSUES
 ----------------------------
 - Pylance reports "unknown import symbol" for detection.py imports in StreamJup.py.
   Root cause: the detection/ folder at the project root shadows UI/detection.py
@@ -171,13 +333,9 @@ KNOWN ISSUES / PENDING WORK
   or move detection/ball-detection and detection/player-detection to the root so
   the detection/ folder no longer exists.
 
-- reframe_9x16.py may be obsolete now that smart cropping is in the UI; can be removed.
-
 - The ABC logo is occasionally misdetected as a sports ball (COCO class 32) by the
   general-purpose yolov8m model. Proposed fixes:
     a) Raise confidence threshold above 0.20
     b) Add a spatial exclusion zone for the logo area
     c) Use a sports-specific fine-tuned YOLO model
-
-- player_detection.py (standalone) is not imported by the UI. The UI's process_video()
-  reimplements the same ByteTrack logic directly. These could be unified.
+    d) Use higher resolution videos and images

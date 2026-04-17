@@ -22,66 +22,22 @@ def _load(module_name: str, file_path: Path):
 
 _sc = _load("smartCroppingVideos",
             _BASE / "cropping" / "smartCroppingVideos.py")
+_bd = _load("ball_detection",
+            _BASE / "detection" / "ball-detection" / "ball_detection.py")
+_pd = _load("player_detection",
+            _BASE / "detection" / "player-detection" / "player_detection.py")
 
-# Re-export names so the IDE and callers can see them
 cropped_width:  int   = _sc.cropped_width
 cropped_height: int   = _sc.cropped_height
 
-GAUSSIAN_SIGMA:        int   = 15
-BALL_MIN_AREA_FRAC:    float = 0.0001
-BALL_MAX_AREA_FRAC:    float = 0.02
-OUTLIER_MAD_THRESHOLD: float = 3.0
-
-
-# ─── Shared crop helpers ──────────────────────────────────────────────────────
-
-def _choose_best_ball(boxes, ball_class_id: int):
-    """Return (box_xyxy, confidence) for the highest-conf sports ball, or None."""
-    if boxes is None or len(boxes) == 0:
-        return None
-    confs        = boxes.conf.cpu().numpy()
-    classes      = boxes.cls.cpu().numpy().astype(int)
-    ball_indices = np.where(classes == ball_class_id)[0]
-    if ball_indices.size == 0:
-        return None
-    best = ball_indices[np.argmax(confs[ball_indices])]
-    return boxes.xyxy[best].cpu().numpy(), float(confs[best])
-
-
-def _is_valid_ball_size(box_xyxy, frame_w: int, frame_h: int) -> bool:
-    """Return True if the bounding box area is within a plausible basketball range."""
-    x1, y1, x2, y2 = box_xyxy
-    frac = (x2 - x1) * (y2 - y1) / (frame_w * frame_h)
-    return BALL_MIN_AREA_FRAC <= frac <= BALL_MAX_AREA_FRAC
-
-
-def _reject_spatial_outliers(known_indices: list, known_x1s: list,
-                              known_cxs: list) -> tuple:
-    """Remove detections whose cx is a MAD-sigma outlier across the full clip."""
-    if len(known_cxs) < 4:
-        return known_indices, known_x1s
-    cx_arr    = np.array(known_cxs, dtype=np.float64)
-    median_cx = np.median(cx_arr)
-    mad       = np.median(np.abs(cx_arr - median_cx))
-    if mad < 1e-6:
-        return known_indices, known_x1s
-    z    = np.abs(cx_arr - median_cx) / (mad / 0.6745)
-    mask = z <= OUTLIER_MAD_THRESHOLD
-    return (
-        [known_indices[i] for i in range(len(known_indices)) if mask[i]],
-        [known_x1s[i]     for i in range(len(known_x1s))     if mask[i]],
-    )
+GAUSSIAN_SIGMA           = _bd.GAUSSIAN_SIGMA
+_choose_best_ball        = _bd._choose_best_ball
+_is_valid_ball_size      = _bd._is_valid_ball_size
+_reject_spatial_outliers = _bd._reject_spatial_outliers
+draw_tracked_boxes       = _pd.draw_tracked_boxes
 
 
 # ─── Player detection ─────────────────────────────────────────────────────────
-
-def draw_tracked_boxes(frame, boxes, track_ids):
-    for box, tid in zip(boxes, track_ids):
-        x1, y1, x2, y2 = map(int, box)
-        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        cv2.putText(frame, f"ID {int(tid)}", (x1, max(0, y1 - 6)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-    return frame
 
 
 def process_video(video_path, model):
@@ -157,18 +113,13 @@ def process_ball_video(video_path, model):
         frame_rgb = cv2.cvtColor(result.orig_img, cv2.COLOR_BGR2RGB)
         clean_frames.append(frame_rgb.copy())
 
-        have_det = False
-        if result.boxes is not None and len(result.boxes) > 0:
-            confs   = result.boxes.conf.cpu().numpy()   # type: ignore[union-attr]
-            classes = result.boxes.cls.cpu().numpy()    # type: ignore[union-attr]
-
-            idx = int(np.argmax(confs))
-            if int(classes[idx]) == ball_class_id:
-                xyxy = result.boxes.xyxy[idx].cpu().numpy()  # type: ignore[union-attr]
-                x1, y1, x2, y2 = float(xyxy[0]), float(xyxy[1]), float(xyxy[2]), float(xyxy[3])
-                conf = float(confs[idx])
+        have_det  = False
+        detection = _choose_best_ball(result.boxes, ball_class_id)
+        if detection is not None:
+            box_xyxy, conf = detection
+            if _is_valid_ball_size(box_xyxy, frame_w, frame_h):
+                x1, y1, x2, y2 = (float(v) for v in box_xyxy)
                 cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
-
                 frame_ball_boxes[str(i)] = [x1, y1, x2, y2, conf]
                 known_indices.append(i)
                 known_cxs.append(cx)
@@ -183,7 +134,14 @@ def process_ball_video(video_path, model):
 
     progress.empty()
 
-    # Pass 1.5 — gap-fill then Gaussian smooth the full cx/cy trajectory
+    # Pass 1.5 — outlier rejection, gap-fill, Gaussian smooth
+    known_indices, _ = _reject_spatial_outliers(known_indices, known_cxs, known_cxs)
+    _cx_by_idx = {i: cx for i, cx in zip(known_indices, known_cxs)}
+    _cy_by_idx = {i: cy for i, cy in zip(known_indices, known_cys)}
+    frame_ball_boxes = {k: v for k, v in frame_ball_boxes.items() if int(k) in _cx_by_idx}
+    known_cxs = [_cx_by_idx[i] for i in known_indices]
+    known_cys = [_cy_by_idx[i] for i in known_indices]
+
     n = len(clean_frames)
     frame_gaussian = {}
     if known_indices and n > 0:
@@ -220,7 +178,6 @@ def process_smart_crop_video(video_path, model):
 
     clean_frames  = []
     known_indices = []
-    known_x1s     = []
     known_cxs     = []
     known_cys     = []
     idx_to_box    = {}   # frame index → (box_xyxy, conf)
@@ -228,24 +185,26 @@ def process_smart_crop_video(video_path, model):
     progress = st.progress(0, text="Running smart crop...")
     start    = time.time()
 
-    # Pass 1 — detect ball in every frame, collect crop positions
+    # Pass 1 — detect ball using the same logic as process_ball_video
     for i, result in enumerate(model.predict(
             source=video_path, classes=[ball_class_id], stream=True,
             save=False, conf=0.20, iou=0.4, imgsz=768)):
         clean_frames.append(cv2.cvtColor(result.orig_img, cv2.COLOR_BGR2RGB))
 
-        detection = _choose_best_ball(result.boxes, ball_class_id)
-        if detection is not None:
-            box_xyxy, conf = detection
-            if _is_valid_ball_size(box_xyxy, frame_w, frame_h):
-                cx = (box_xyxy[0] + box_xyxy[2]) / 2.0
-                cy = (box_xyxy[1] + box_xyxy[3]) / 2.0
-                x1 = float(np.clip(cx - target_w / 2.0, 0, max_x1))
+        if result.boxes is not None and len(result.boxes) > 0:
+            confs   = result.boxes.conf.cpu().numpy()   # type: ignore[union-attr]
+            classes = result.boxes.cls.cpu().numpy()    # type: ignore[union-attr]
+
+            idx = int(np.argmax(confs))
+            if int(classes[idx]) == ball_class_id:
+                xyxy = result.boxes.xyxy[idx].cpu().numpy()  # type: ignore[union-attr]
+                x1, y1, x2, y2 = float(xyxy[0]), float(xyxy[1]), float(xyxy[2]), float(xyxy[3])
+                conf = float(confs[idx])
+                cx, cy = (x1 + x2) / 2.0, (y1 + y2) / 2.0
                 known_indices.append(i)
-                known_x1s.append(x1)
                 known_cxs.append(cx)
                 known_cys.append(cy)
-                idx_to_box[i] = (box_xyxy, conf)
+                idx_to_box[i] = (xyxy, conf)
 
         if total_frames > 0:
             progress.progress(min((i + 1) / total_frames, 1.0),
@@ -257,36 +216,25 @@ def process_smart_crop_video(video_path, model):
     if n == 0:
         return None
 
-    # Outlier rejection — save cx/cy lookup first so we can re-align after
-    _cx_by_idx = dict(zip(known_indices, known_cxs))
-    _cy_by_idx = dict(zip(known_indices, known_cys))
-
-    known_indices, known_x1s = _reject_spatial_outliers(known_indices, known_x1s, known_cxs)
-    frame_boxes = {idx: idx_to_box[idx] for idx in known_indices if idx in idx_to_box}
-
-    known_cxs = [_cx_by_idx[i] for i in known_indices]
-    known_cys = [_cy_by_idx[i] for i in known_indices]
-
-    # Gap-fill via linear interpolation
+    # Pass 1.5 — gap-fill then Gaussian smooth cx/cy directly (same as ball detection)
     all_idx = np.arange(n)
     if len(known_indices) == 0:
-        raw_x1s = np.full(n, max_x1 / 2.0)
-        raw_cxs = np.full(n, frame_w  / 2.0)
-        raw_cys = np.full(n, frame_h  / 2.0)
+        smooth_cx = np.full(n, frame_w / 2.0)
+        smooth_cy = np.full(n, frame_h / 2.0)
     else:
-        raw_x1s = np.interp(all_idx, known_indices, known_x1s)
-        raw_cxs = np.interp(all_idx, known_indices, known_cxs)
-        raw_cys = np.interp(all_idx, known_indices, known_cys)
+        smooth_cx = gaussian_filter1d(
+            np.interp(all_idx, known_indices, known_cxs),
+            sigma=GAUSSIAN_SIGMA, mode="nearest",
+        )
+        smooth_cy = gaussian_filter1d(
+            np.interp(all_idx, known_indices, known_cys),
+            sigma=GAUSSIAN_SIGMA, mode="nearest",
+        )
 
-    # Pass 1.5 — Gaussian smooth the full trajectory (symmetric, no causal lag)
-    smoothed_x1s = np.clip(
-        gaussian_filter1d(raw_x1s, sigma=GAUSSIAN_SIGMA, mode="nearest"),
-        0, max_x1,
-    )
-    smoothed_cxs = gaussian_filter1d(raw_cxs, sigma=GAUSSIAN_SIGMA, mode="nearest")
-    smoothed_cys = gaussian_filter1d(raw_cys, sigma=GAUSSIAN_SIGMA, mode="nearest")
+    # Derive crop x1 from the smoothed ball center — clamp only after smoothing
+    smoothed_x1s = np.clip(smooth_cx - target_w / 2.0, 0, max_x1)
 
-    # Pass 2 — crop each frame using smoothed x1 positions, build overlay dicts
+    # Pass 2 — crop each frame, build overlay dicts
     sx = cropped_width  / target_w
     sy = cropped_height / frame_h
 
@@ -300,19 +248,19 @@ def process_smart_crop_video(video_path, model):
         cropped = frame[:, x1_int: x1_int + target_w]
         cropped_frames.append(cv2.resize(cropped, (cropped_width, cropped_height)))
 
-        if i in frame_boxes:
-            bx1, by1, bx2, by2 = frame_boxes[i][0]
-            conf = frame_boxes[i][1]
+        if i in idx_to_box:
+            bx1, by1, bx2, by2 = idx_to_box[i][0]
+            conf = idx_to_box[i][1]
             frame_ball_boxes_crop[str(i)] = [
                 float((bx1 - x1_int) * sx), float(by1 * sy),
                 float((bx2 - x1_int) * sx), float(by2 * sy),
                 conf,
             ]
 
-        # Smoothed ball position mapped into cropped-frame coordinates
+        # Smoothed ball center mapped into cropped-frame coordinates
         frame_pred_crop[str(i)] = [
-            float((smoothed_cxs[i] - x1_int) * sx),
-            float(smoothed_cys[i] * sy),
+            float((smooth_cx[i] - x1_int) * sx),
+            float(smooth_cy[i] * sy),
         ]
 
     return (cropped_frames, frame_ball_boxes_crop, frame_pred_crop,
