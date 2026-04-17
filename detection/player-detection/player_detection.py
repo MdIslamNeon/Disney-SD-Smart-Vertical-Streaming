@@ -14,6 +14,15 @@ BASE_DIR = Path(__file__).resolve().parent.parent.parent
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
+def draw_tracked_boxes(frame, boxes, track_ids):
+    for box, tid in zip(boxes, track_ids):
+        x1, y1, x2, y2 = map(int, box)
+        cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cv2.putText(frame, f"ID {int(tid)}", (x1, max(0, y1 - 6)),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+    return frame
+
+
 def load_model(model_path: Path = BASE_DIR / "models" / "yolov8m.pt") -> YOLO:
     return YOLO(str(model_path))
 
@@ -63,15 +72,11 @@ def run_tracking(video_path: Path, model: YOLO, output_folder: Path) -> Path:
         frame = result.orig_img.copy()
 
         if result.boxes is not None and result.boxes.id is not None:
-            for box, tid in zip(
-                result.boxes.xyxy.cpu().numpy(),   # type: ignore[union-attr]
-                result.boxes.id.cpu().numpy(),     # type: ignore[union-attr]
-            ):
-                x1, y1, x2, y2 = map(int, box)
-                track_id = int(tid)
-                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-                cv2.putText(frame, f"ID {track_id}", (x1, max(0, y1 - 6)),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            draw_tracked_boxes(
+                frame,
+                result.boxes.xyxy.cpu().numpy(),  # type: ignore[union-attr]
+                result.boxes.id.cpu().numpy(),    # type: ignore[union-attr]
+            )
 
         frame_id += 1
         live_fps = frame_id / max(time.time() - t0, 1e-6)

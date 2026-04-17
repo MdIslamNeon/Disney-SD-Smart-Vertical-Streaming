@@ -39,14 +39,12 @@ def _choose_best_ball(boxes, ball_class_id: int):
 
 
 def _is_valid_ball_size(box_xyxy, frame_w: int, frame_h: int) -> bool:
-    """Return True if the bounding box area is within a plausible basketball range."""
     x1, y1, x2, y2 = box_xyxy
     frac = (x2 - x1) * (y2 - y1) / (frame_w * frame_h)
     return BALL_MIN_AREA_FRAC <= frac <= BALL_MAX_AREA_FRAC
 
 
-def _reject_spatial_outliers(known_indices: list, known_x1s: list,
-                              known_cxs: list) -> tuple:
+def _reject_spatial_outliers(known_indices: list, known_x1s: list, known_cxs: list) -> tuple:
     """Remove detections whose cx is a MAD-sigma outlier across the full clip."""
     if len(known_cxs) < 4:
         return known_indices, known_x1s
