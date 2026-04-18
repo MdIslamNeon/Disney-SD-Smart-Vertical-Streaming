@@ -264,4 +264,5 @@ def process_smart_crop_video(video_path, model):
         ]
 
     return (cropped_frames, frame_ball_boxes_crop, frame_pred_crop,
-            fps, time.time() - start)
+            fps, time.time() - start,
+            smoothed_x1s.tolist(), float(sx), float(sy))

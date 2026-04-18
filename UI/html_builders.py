@@ -256,6 +256,197 @@ def build_ball_html(video_url: str, frame_ball_boxes: dict, frame_gaussian: dict
 """
 
 
+def build_final_product_html(video_url: str, frame_boxes: dict,
+                             sc_ball_boxes: dict, sc_pred: dict,
+                             smoothed_x1s: list,
+                             sx: float, sy: float, fps: float) -> str:
+    player_json  = json.dumps(frame_boxes)
+    ball_json    = json.dumps(sc_ball_boxes)
+    pred_json    = json.dumps(sc_pred)
+    crop_x1_json = json.dumps(smoothed_x1s)
+    return f"""
+<style>
+  * {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{ background: #000; display: flex; flex-direction: column; align-items: center; }}
+
+  #controls {{
+    width: 100%;
+    max-width: 420px;
+    min-height: 44px;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 8px;
+    background: #111;
+  }}
+  .toggleBtn {{
+    padding: 5px 14px;
+    font-size: 13px;
+    font-weight: bold;
+    border-radius: 6px;
+    cursor: pointer;
+  }}
+  #playerBtn {{
+    border: 2px solid #00ff44;
+    background: #00ff44;
+    color: #000;
+  }}
+  #playerBtn.off {{
+    background: #333;
+    border-color: #555;
+    color: #aaa;
+  }}
+  #ballBoxBtn {{
+    border: 2px solid #ffff00;
+    background: #ffff00;
+    color: #000;
+  }}
+  #ballBoxBtn.off {{
+    background: #333;
+    border-color: #555;
+    color: #aaa;
+  }}
+  #predBtn {{
+    border: 2px solid #ff6400;
+    background: #ff6400;
+    color: #fff;
+  }}
+  #predBtn.off {{
+    background: #333;
+    border-color: #555;
+    color: #aaa;
+  }}
+  #player-wrap {{
+    position: relative;
+    width: 100%;
+    max-width: 420px;
+    background: #000;
+  }}
+  #vid {{
+    width: 100%;
+    height: auto;
+    display: block;
+  }}
+  #overlay {{
+    position: absolute;
+    top: 0; left: 0;
+    pointer-events: none;
+  }}
+</style>
+
+<div id="controls">
+  <button id="playerBtn"  class="toggleBtn" onclick="togglePlayer()">Player Boxes: ON</button>
+  <button id="ballBoxBtn" class="toggleBtn" onclick="toggleBall()">Ball Box: ON</button>
+  <button id="predBtn"    class="toggleBtn" onclick="togglePred()">Tracker Prediction: ON</button>
+</div>
+<div id="player-wrap">
+  <video id="vid" controls>
+    <source src="{video_url}" type="video/mp4">
+  </video>
+  <canvas id="overlay"></canvas>
+</div>
+
+<script>
+  const PLAYER_BOXES = {player_json};
+  const BALL_BOXES   = {ball_json};
+  const CROP_X1S     = {crop_x1_json};
+  const PRED         = {pred_json};
+  const SX  = {sx};
+  const SY  = {sy};
+  const FPS = {fps};
+  const OUT_W = 540;
+  const OUT_H = 960;
+  let showPlayer = true;
+  let showBall   = true;
+  let showPred   = true;
+
+  const vid    = document.getElementById('vid');
+  const canvas = document.getElementById('overlay');
+  const ctx    = canvas.getContext('2d');
+
+  function resizeCanvas() {{
+    canvas.width        = vid.clientWidth;
+    canvas.height       = vid.clientHeight;
+    canvas.style.width  = vid.clientWidth  + 'px';
+    canvas.style.height = vid.clientHeight + 'px';
+  }}
+
+  function drawFrame() {{
+    resizeCanvas();
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+    const frameIdx = Math.floor(vid.currentTime * FPS);
+    const scaleX   = canvas.width  / OUT_W;
+    const scaleY   = canvas.height / OUT_H;
+    const cropX1   = CROP_X1S[frameIdx] || 0;
+
+    if (showPlayer) {{
+      const frameData = PLAYER_BOXES[String(frameIdx)] || [];
+      ctx.strokeStyle = '#00ff44';
+      ctx.lineWidth   = 2;
+      ctx.fillStyle   = '#00ff44';
+      ctx.font        = 'bold 12px sans-serif';
+      for (const [x1, y1, x2, y2, tid] of frameData) {{
+        const cx1 = (x1 - cropX1) * SX * scaleX;
+        const cy1 = y1 * SY * scaleY;
+        const cw  = (x2 - x1) * SX * scaleX;
+        const ch  = (y2 - y1) * SY * scaleY;
+        if (cx1 + cw < 0 || cx1 > canvas.width) continue;
+        ctx.strokeRect(cx1, cy1, cw, ch);
+        ctx.fillText('ID ' + tid, cx1 + 2, Math.max(cy1 - 4, 12));
+      }}
+    }}
+
+    if (showBall && BALL_BOXES[String(frameIdx)]) {{
+      const [bx1, by1, bx2, by2, conf] = BALL_BOXES[String(frameIdx)];
+      ctx.strokeStyle = '#ffff00';
+      ctx.lineWidth   = 3;
+      ctx.strokeRect(bx1 * scaleX, by1 * scaleY, (bx2 - bx1) * scaleX, (by2 - by1) * scaleY);
+      ctx.fillStyle = '#ffff00';
+      ctx.font      = 'bold 13px sans-serif';
+      ctx.fillText(Math.round(conf * 100) + '%', bx1 * scaleX + 2, Math.max(14, by1 * scaleY - 4));
+    }}
+
+    if (showPred && PRED[String(frameIdx)]) {{
+      const [px, py] = PRED[String(frameIdx)];
+      ctx.strokeStyle = '#ff6400';
+      ctx.lineWidth   = 2;
+      ctx.beginPath();
+      ctx.arc(px * scaleX, py * scaleY, 14, 0, 2 * Math.PI);
+      ctx.stroke();
+    }}
+
+    requestAnimationFrame(drawFrame);
+  }}
+
+  function togglePlayer() {{
+    showPlayer = !showPlayer;
+    const btn = document.getElementById('playerBtn');
+    btn.textContent = 'Player Boxes: ' + (showPlayer ? 'ON' : 'OFF');
+    btn.classList.toggle('off', !showPlayer);
+  }}
+
+  function toggleBall() {{
+    showBall = !showBall;
+    const btn = document.getElementById('ballBoxBtn');
+    btn.textContent = 'Ball Box: ' + (showBall ? 'ON' : 'OFF');
+    btn.classList.toggle('off', !showBall);
+  }}
+
+  function togglePred() {{
+    showPred = !showPred;
+    const btn = document.getElementById('predBtn');
+    btn.textContent = 'Tracker Prediction: ' + (showPred ? 'ON' : 'OFF');
+    btn.classList.toggle('off', !showPred);
+  }}
+
+  vid.addEventListener('loadedmetadata', () => {{ resizeCanvas(); drawFrame(); }});
+  window.addEventListener('resize', resizeCanvas);
+</script>
+"""
+
+
 def build_smart_crop_html(video_url: str, frame_ball_boxes: dict,
                            frame_pred: dict, fps: float) -> str:
     ball_json = json.dumps(frame_ball_boxes)
