@@ -26,6 +26,7 @@
 ultralytics==8.4.30
 opencv-python==4.13.0.92
 numpy==2.2.6
+lap>=0.4.0  # Linear assignment solver required by ultralytics trackers (BOTSORT/ByteTrack)
 
 # ByteTrack tracking is provided by ultralytics built-in tracker:
 #   model.track(tracker="bytetrack.yaml")
