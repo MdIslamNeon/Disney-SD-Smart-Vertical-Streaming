@@ -15,11 +15,18 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 
 def draw_tracked_boxes(frame, boxes, track_ids):
+    font = cv2.FONT_HERSHEY_SIMPLEX
+    scale, thick, pad = 0.6, 2, 4
     for box, tid in zip(boxes, track_ids):
         x1, y1, x2, y2 = map(int, box)
         cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-        cv2.putText(frame, f"ID {int(tid)}", (x1, max(0, y1 - 6)),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        label = f"ID {int(tid)}"
+        (tw, th), _ = cv2.getTextSize(label, font, scale, thick)
+        ly2 = max(th + pad * 2, y1)
+        ly1 = ly2 - (th + pad * 2)
+        cv2.rectangle(frame, (x1, ly1), (x1 + tw + pad * 2, ly2), (0, 255, 0), -1)
+        cv2.putText(frame, label, (x1 + pad, ly2 - pad),
+                    font, scale, (0, 0, 0), thick)
     return frame
 
 

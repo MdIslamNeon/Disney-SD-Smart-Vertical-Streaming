@@ -216,12 +216,21 @@ def build_ball_html(video_url: str, frame_ball_boxes: dict, frame_gaussian: dict
 
     if (showBallBox && BALL_BOXES[frameIdx]) {{
       const [x1, y1, x2, y2, conf] = BALL_BOXES[frameIdx];
+      const bx = x1*scaleX, by = y1*scaleY;
+      const bw = (x2-x1)*scaleX, bh = (y2-y1)*scaleY;
       ctx.strokeStyle = '#ffff00';
       ctx.lineWidth   = 3;
-      ctx.strokeRect(x1*scaleX, y1*scaleY, (x2-x1)*scaleX, (y2-y1)*scaleY);
+      ctx.strokeRect(bx, by, bw, bh);
+      const label = 'Ball ' + Math.round(conf*100) + '%';
+      ctx.font = 'bold 16px sans-serif';
+      const pad = 4, tw = ctx.measureText(label).width;
+      const lh = 20, ly = Math.max(lh, by) - lh;
       ctx.fillStyle = '#ffff00';
-      ctx.font      = 'bold 13px sans-serif';
-      ctx.fillText(Math.round(conf*100) + '%', x1*scaleX + 2, y1*scaleY - 4);
+      ctx.fillRect(bx, ly, tw + pad*2, lh);
+      ctx.fillStyle = '#000';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label, bx + pad, ly + lh/2);
+      ctx.textBaseline = 'alphabetic';
     }}
 
     if (showGaussian && GAUSSIAN[frameIdx]) {{
@@ -383,29 +392,45 @@ def build_final_product_html(video_url: str, frame_boxes: dict,
 
     if (showPlayer) {{
       const frameData = PLAYER_BOXES[String(frameIdx)] || [];
-      ctx.strokeStyle = '#00ff44';
-      ctx.lineWidth   = 2;
-      ctx.fillStyle   = '#00ff44';
-      ctx.font        = 'bold 12px sans-serif';
+      ctx.lineWidth = 2;
+      ctx.font      = 'bold 16px sans-serif';
       for (const [x1, y1, x2, y2, tid] of frameData) {{
         const cx1 = (x1 - cropX1) * SX * scaleX;
         const cy1 = y1 * SY * scaleY;
         const cw  = (x2 - x1) * SX * scaleX;
         const ch  = (y2 - y1) * SY * scaleY;
         if (cx1 + cw < 0 || cx1 > canvas.width) continue;
+        ctx.strokeStyle = '#00ff44';
         ctx.strokeRect(cx1, cy1, cw, ch);
-        ctx.fillText('ID ' + tid, cx1 + 2, Math.max(cy1 - 4, 12));
+        const label = 'ID ' + tid;
+        const pad = 4, tw = ctx.measureText(label).width;
+        const lh = 20, ly = Math.max(lh, cy1) - lh;
+        ctx.fillStyle = '#00ff44';
+        ctx.fillRect(cx1, ly, tw + pad*2, lh);
+        ctx.fillStyle = '#000';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(label, cx1 + pad, ly + lh/2);
+        ctx.textBaseline = 'alphabetic';
       }}
     }}
 
     if (showBall && BALL_BOXES[String(frameIdx)]) {{
       const [bx1, by1, bx2, by2, conf] = BALL_BOXES[String(frameIdx)];
+      const bx = bx1 * scaleX, by = by1 * scaleY;
+      const bw = (bx2 - bx1) * scaleX, bh = (by2 - by1) * scaleY;
       ctx.strokeStyle = '#ffff00';
       ctx.lineWidth   = 3;
-      ctx.strokeRect(bx1 * scaleX, by1 * scaleY, (bx2 - bx1) * scaleX, (by2 - by1) * scaleY);
+      ctx.strokeRect(bx, by, bw, bh);
+      const label = 'Ball ' + Math.round(conf * 100) + '%';
+      ctx.font = 'bold 16px sans-serif';
+      const pad = 4, tw = ctx.measureText(label).width;
+      const lh = 20, ly = Math.max(lh, by) - lh;
       ctx.fillStyle = '#ffff00';
-      ctx.font      = 'bold 13px sans-serif';
-      ctx.fillText(Math.round(conf * 100) + '%', bx1 * scaleX + 2, Math.max(14, by1 * scaleY - 4));
+      ctx.fillRect(bx, ly, tw + pad*2, lh);
+      ctx.fillStyle = '#000';
+      ctx.textBaseline = 'middle';
+      ctx.fillText(label, bx + pad, ly + lh/2);
+      ctx.textBaseline = 'alphabetic';
     }}
 
     if (showPred && PRED[String(frameIdx)]) {{
