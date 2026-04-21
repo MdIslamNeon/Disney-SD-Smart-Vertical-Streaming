@@ -59,7 +59,7 @@ Disney-SD-Smart-Vertical-Streaming/
 
 | Module | Symbols loaded |
 |---|---|
-| `cropping/smartCroppingVideos.py` | `cropped_width`, `cropped_height`, `BallTracker` |
+| `cropping/smartCroppingVideos.py` | `cropped_width`, `cropped_height` |
 | `detection/ball-detection/ball_detection.py` | `GAUSSIAN_SIGMA`, `_choose_best_ball`, `_is_valid_ball_size`, `_reject_spatial_outliers` |
 | `detection/player-detection/player_detection.py` | `draw_tracked_boxes` |
 
